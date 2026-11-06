@@ -43,6 +43,11 @@ When tmux leaves control mode (=M-x ghostel-tmux-detach=, =C-t d= in a pane, or
 anything else that ends the session), every window showing a pane goes
 back to the shell buffer and the pane buffers stay as read-only snapshots.
 
+A tmux client that dies without detaching (=kill -9=, a crash) leaves control
+mode open until the shell prints an escape sequence, which most prompts
+do.  With a plain prompt such as macOS's =/bin/bash=, run
+=M-x ghostel-tmux-reset= and press =C-l=.
+
 With the mode off, =tmux -CC= in a ghostel shell shows nothing until tmux
 exits, as in any terminal without control-mode support.
 
@@ -84,8 +89,8 @@ over the active session, so they work the same whether you started tmux via
 | =C-t c=        | =new-window=            | Create a new window.                         |
 | =C-t x=        | =kill-pane=             | Kill the current pane.                       |
 | =C-t &=        | =kill-window=           | Kill the current window.                     |
-| =C-t n=        | =next-window=           | Cycle to the next window.                    |
-| =C-t p=        | =previous-window=       | Cycle to the previous window.                |
+| =C-t n=        | =select-window=         | Cycle to the next window.                    |
+| =C-t p=        | =select-window=         | Cycle to the previous window.                |
 | =C-t o=        | =select-pane -t :.+=    | Cycle to the next pane.                      |
 | =C-t ,=        | =rename-window=         | Prompt and rename the current window.       |
 | =C-t $=        | =rename-session=        | Prompt and rename the current session.      |
@@ -127,11 +132,21 @@ so the server lays the panes out for the real client size.
 =make all= byte-compiles, runs the unit tests and the shell wrapper test,
 and lints.  =make test-native= runs the tests that need ghostel's native
 module, built in =GHOSTEL_DIR= (default =~/.emacs.d/lib/ghostel=).
-=test/elate/tmux-cc.json= is a live [[https://github.com/dakra/elate][elate]] matrix over shells and PTY
-backends; it finds the two checkouts through =GHOSTEL_DIR= and
-=GHOSTEL_TMUX_DIR=:
+
+=make test-elate= drives a real tmux from sandboxed Emacs sessions with
+[[https://github.com/dakra/elate][elate]].  It needs the native module, tmux, and bash, zsh, fish and
+nushell at the paths named in the scenarios.  Each run has a private tmux
+server under =/tmp/ghostel-tmux-elate-*=.
+
+| Scenario                     | Covers                                                                   |
+|------------------------------+--------------------------------------------------------------------------|
+| =test/elate/takeover.json=     | =tmux -CC= in a shell, per host shell and PTY backend, and every way out.  |
+| =test/elate/panes.json=        | Keys, splits, switching, windows, scrollback, a second client, closing.  |
+| =test/elate/subprocess.json=   | =ghostel-tmux-attach=, =ghostel-tmux-new= and =ghostel-tmux-capture=.          |
+
+One variant of one scenario:
 
 #+begin_src sh
-GHOSTEL_DIR=~/.emacs.d/lib/ghostel GHOSTEL_TMUX_DIR=$PWD \
-  elate matrix --emacs "$(command -v emacs)" test/elate/tmux-cc.json
+GHOSTEL_DIR=~/.emacs.d/lib/ghostel \
+  elate run --emacs "$(command -v emacs)" --variant fish-native test/elate/takeover.json
 #+end_src

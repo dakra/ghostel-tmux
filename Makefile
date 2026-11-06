@@ -1,5 +1,6 @@
 EMACS      ?= emacs
 EMACSFLAGS ?=
+ELATE      ?= elate
 
 XDG_CACHE_HOME ?= $(HOME)/.cache
 GHOSTEL_DIR    ?= $(firstword $(wildcard $(HOME)/.emacs.d/lib/ghostel) $(XDG_CACHE_HOME)/ghostel)
@@ -8,7 +9,7 @@ LINT_DEPS_STAMP := $(LINT_ELPA_DIR)/.deps-installed
 
 LOAD_PATH = -L . -L "$(GHOSTEL_DIR)/lisp"
 
-.PHONY: all byte-compile test test-native test-shell lint package-lint checkdoc clean
+.PHONY: all byte-compile test test-native test-shell test-elate lint package-lint checkdoc clean
 
 all: byte-compile test test-shell lint
 
@@ -32,6 +33,13 @@ test-native: ghostel-tmux.elc
 
 test-shell:
 	bash test/shell-wrapper-test.sh
+
+# Needs elate, tmux, the native module built in $(GHOSTEL_DIR), and
+# bash, zsh, fish and nushell.
+test-elate:
+	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/takeover.json
+	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/panes.json
+	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/subprocess.json
 
 lint: byte-compile package-lint checkdoc
 
