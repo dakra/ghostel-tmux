@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs_version:
+          - '28.2'
+          - '29.4'
+          - 'snapshot'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs_version }}
+
+      # ghostel requires compat, which Emacs < 30 doesn't ship.
+      - name: Install compat
+        run: git clone --depth 1 https://github.com/emacs-compat/compat.git /tmp/compat
+
+      - name: Byte-compile and test
+        run: make EMACSFLAGS="-L /tmp/compat" byte-compile test test-shell
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '29.4'
+
+      - name: Run package-lint and checkdoc
+        run: make package-lint checkdoc
