@@ -1270,14 +1270,18 @@
   ;; Window names containing spaces (common with auto-rename) must
   ;; round-trip through the tab-delimited list-windows format.
   (ghostel-tmux-test--with-controller ctl
-    (let ((row "@7\tpython -m foo\tbd5b,80x24,0,0,3"))
+    (let ((row "@7\t%3\tpython -m foo\tbd5b,80x24,0,0,3"))
       (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
                  (lambda (wid layout)
                    (should (= wid 7))
                    (should (equal layout "bd5b,80x24,0,0,3")))))
         (ghostel-tmux--receive-window-rows row))
       (should (equal (plist-get (gethash 7 ghostel-tmux--windows) :name)
-                     "python -m foo")))))
+                     "python -m foo"))
+      ;; The window's active pane is known before tmux ever reports a
+      ;; change of it.
+      (should (eql (plist-get (gethash 7 ghostel-tmux--windows) :active-pane)
+                   3)))))
 
 (ert-deftest ghostel-tmux-test-window-close-removes-pane-buffer ()
   (ghostel-tmux-test--with-controller ctl
@@ -1456,9 +1460,8 @@
       (should (null sent)))))
 
 (ert-deftest ghostel-tmux-test-ensure-pane-zoomed-multi-pane ()
-  ;; Multi-pane windows: queue a select-pane and a conditional zoom as
-  ;; two separate commands (tmux emits one reply block per command, so
-  ;; a `;'-joined line would desync reply pairing).
+  ;; The zoom is conditional on the pane's own window, so a pane shown
+  ;; from another tmux window is not unzoomed.
   (ghostel-tmux-test--with-controller ctl
     (let ((sent nil))
       (with-current-buffer ctl
@@ -1468,13 +1471,129 @@
                 ((symbol-function 'process-send-string)
                  (lambda (_p s) (push s sent))))
         (with-current-buffer ctl
-          (ghostel-tmux--ensure-pane-zoomed 0 5)
-          ;; select-pane is in flight; the zoom command waits in queue.
-          (should (equal sent '("select-pane -t %5\n")))
-          (let ((queued (mapcar #'car ghostel-tmux--command-queue)))
-            (should (= 1 (length queued)))
-            (should (string-match-p "if-shell" (car queued)))
-            (should (string-match-p "resize-pane -Z -t %5" (car queued)))))))))
+          (ghostel-tmux--ensure-pane-zoomed 0 5)))
+      (should (equal sent
+                     '("if-shell -F -t %5 '#{!=:#{window_zoomed_flag},1}' 'resize-pane -Z -t %5'\n"))))))
+
+(defmacro ghostel-tmux-test--with-sent (ctl sent &rest body)
+  "Run BODY in controller CTL, collecting queued commands in SENT."
+  (declare (indent 2))
+  `(cl-letf (((symbol-function 'ghostel-tmux--queue-command)
+              (lambda (cmd &optional _cont) (push cmd ,sent))))
+     (with-current-buffer ,ctl ,@body)
+     (setq ,sent (nreverse ,sent))))
+
+(ert-deftest ghostel-tmux-test-select-pane-skips-reported-pane ()
+  ;; Answering tmux's own report with a selection lets two crossing
+  ;; selections chase each other forever.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-sent ctl sent
+        (setq ghostel-tmux--active-pane-id 5)
+        (ghostel-tmux--select-pane 0 5))
+      (should (null sent)))))
+
+(ert-deftest ghostel-tmux-test-select-pane-selects-pane-and-window ()
+  ;; A pane Emacs chose (tab click, `switch-to-buffer') may live in
+  ;; another tmux window.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-sent ctl sent
+        (setq ghostel-tmux--active-pane-id 5)
+        (ghostel-tmux--select-pane 3 7)
+        (should (eql ghostel-tmux--active-pane-id 7)))
+      (should (equal sent '("select-pane -t %7" "select-window -t @3"))))))
+
+(ert-deftest ghostel-tmux-test-select-pane-after-attach-keeps-window ()
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-sent ctl sent
+        (ghostel-tmux--select-pane 3 7))
+      (should (equal sent '("select-pane -t %7"))))))
+
+(ert-deftest ghostel-tmux-test-session-window-changed-follows-recorded-pane ()
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (followed nil)
+          (a (generate-new-buffer "*swc-a*"))
+          (b (generate-new-buffer "*swc-b*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
+                     (lambda (pid) (push pid followed))))
+            (ghostel-tmux-test--with-sent ctl sent
+              (puthash 5 a ghostel-tmux--panes)
+              (puthash 6 b ghostel-tmux--panes)
+              (puthash 0 (list :name "w" :panes (list 5 6) :active-pane 6)
+                       ghostel-tmux--windows)
+              (ghostel-tmux--on-session-window-changed 1 0))
+            (should (equal followed '(6)))
+            (should (null sent)))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
+(ert-deftest ghostel-tmux-test-session-window-changed-selects-a-guess ()
+  ;; Without a recorded active pane the first pane is a guess; tmux is
+  ;; told, so both sides agree.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (followed nil)
+          (a (generate-new-buffer "*swc-a*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
+                     (lambda (pid) (push pid followed))))
+            (ghostel-tmux-test--with-sent ctl sent
+              (puthash 5 a ghostel-tmux--panes)
+              (puthash 0 (list :name "w" :panes (list 5 6))
+                       ghostel-tmux--windows)
+              (ghostel-tmux--on-session-window-changed 1 0))
+            (should (equal followed '(5)))
+            (should (equal sent '("select-pane -t %5"))))
+        (kill-buffer a)))))
+
+(ert-deftest ghostel-tmux-test-follow-leaves-shown-pane-alone ()
+  ;; A pane shown in one Emacs window must not take over a second
+  ;; window that shows a sibling.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((displayed nil)
+          (a (generate-new-buffer "*fl-a*"))
+          (b (generate-new-buffer "*fl-b*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) a)
+            (set-window-buffer (split-window) b)
+            (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                       (lambda (buf _w) (push buf displayed))))
+              (with-current-buffer ctl
+                (puthash 5 a ghostel-tmux--panes)
+                (puthash 6 b ghostel-tmux--panes)
+                (ghostel-tmux--follow-active-pane 6)))
+            (should (null displayed)))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
+(ert-deftest ghostel-tmux-test-cycle-pane-selects-window ()
+  ;; The next pane may be the active pane of another tmux window:
+  ;; `select-pane' alone changes nothing there.
+  (let ((cmds nil)
+        (pane-a (generate-new-buffer "*test-cw-a*"))
+        (pane-b (generate-new-buffer "*test-cw-b*")))
+    (unwind-protect
+        (ghostel-tmux-test--with-controller ctl
+          (with-current-buffer pane-b
+            (setq-local ghostel-tmux--pane-id 2
+                        ghostel-tmux--window-id 7))
+          (cl-letf (((symbol-function 'ghostel-tmux--cmd)
+                     (lambda (c) (push c cmds)))
+                    ((symbol-function 'ghostel-tmux--pane-list)
+                     (lambda (_ctl) (list pane-a pane-b))))
+            (with-current-buffer pane-a
+              (setq-local ghostel-tmux--controller-buffer ctl
+                          ghostel-tmux--pane-id 1
+                          ghostel-tmux--window-id 0)
+              (ghostel-tmux-next-pane)))
+          (should (equal (nreverse cmds)
+                         '("select-pane -t %2" "select-window -t @7"))))
+      (kill-buffer pane-a)
+      (kill-buffer pane-b))))
 
 (ert-deftest ghostel-tmux-test-enter-control-mode-renames-host ()
   ;; The host buffer should be hidden from the user-visible buffer
@@ -1553,6 +1672,108 @@
 (ert-deftest ghostel-tmux-test-reset-without-session-errors ()
   (with-temp-buffer
     (should-error (ghostel-tmux-reset) :type 'user-error)))
+
+(ert-deftest ghostel-tmux-test-sealed-pane-is-cut-off ()
+  ;; A takeover host can attach again; a snapshot of the old attach
+  ;; must not act on the new session.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*ghostel-tmux:sealed%0*"))
+          (sent nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'process-send-string)
+                     (lambda (_p s) (push s sent))))
+            (setq ghostel-tmux--controller-process 'fake-proc)
+            (with-current-buffer pane
+              (ghostel-tmux-pane-mode 1)
+              (setq-local ghostel-tmux--controller-buffer ctl
+                          ghostel-tmux--pane-id 0))
+            (ghostel-tmux--seal-pane-buffer pane)
+            (with-current-buffer pane
+              (should-not tab-line-mode)
+              (should-error (ghostel-tmux--prefix-new-window)
+                            :type 'user-error))
+            (should (null sent)))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-no-command-after-detach ()
+  ;; tmux reads nothing after `detach-client'; a command queued behind
+  ;; it would reach the host shell as typed input.
+  (let ((host (generate-new-buffer "*tmux-host-closing*"))
+        (sent nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel--write-pty)
+                   (lambda (_term s) (push s sent))))
+          (with-current-buffer host
+            (ghostel-mode)
+            (setq ghostel-tmux--dcs-active t
+                  ghostel-tmux--parser-state 'idle
+                  ghostel-tmux--panes (make-hash-table)
+                  ghostel--term 'fake-term)
+            (ghostel-tmux-detach)
+            (ghostel-tmux--queue-command "refresh-client -C 80,24")
+            (ghostel-tmux--feed-bytes "%begin 1 1 1\r\n%end 1 1 1\r\n")
+            (ghostel-tmux--pump-deferred host))
+          (should (equal sent '("detach-client\n"))))
+      (kill-buffer host))))
+
+(ert-deftest ghostel-tmux-test-no-command-after-exit ()
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (setq ghostel-tmux--controller-process 'fake-proc
+            ghostel-tmux--parser-state 'idle)
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'process-send-string)
+                 (lambda (_p s) (push s sent))))
+        (ghostel-tmux--feed-bytes "%exit\r\n")
+        (ghostel-tmux--queue-command "list-windows"))
+      (should (null sent)))))
+
+(ert-deftest ghostel-tmux-test-enter-control-mode-accepts-commands-again ()
+  (ghostel-tmux-test--with-host host
+    (setq ghostel-tmux--closing t)
+    (ghostel-tmux--enter-control-mode host)
+    (should-not ghostel-tmux--closing)))
+
+(ert-deftest ghostel-tmux-test-resize-pane-commits-before-reporting ()
+  ;; The terminal commits a resize on its next redraw and clears the
+  ;; prompt row then.  That has to happen before tmux hears of the
+  ;; size, or it would clear the prompt the shell repaints.
+  (let ((ctl (generate-new-buffer "*ghostel-tmux:commit-ctl%0*"))
+        (events nil))
+    (unwind-protect
+        (with-temp-buffer
+          (with-current-buffer ctl
+            (setq-local ghostel-tmux--controller-process 'fake-proc))
+          (setq-local ghostel-tmux--controller-buffer ctl
+                      ghostel--term 'fake-term)
+          (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
+                     (lambda (&rest _) (push 'resize events)))
+                    ((symbol-function 'ghostel--redraw-now)
+                     (lambda (&rest _) (push 'redraw events)))
+                    ((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'process-send-string)
+                     (lambda (&rest _) (push 'report events))))
+            (ghostel-tmux--resize-pane 40 120))
+          (should (equal (nreverse events) '(resize redraw report))))
+      (kill-buffer ctl))))
+
+(ert-deftest ghostel-tmux-test-capture-feeds-rows-with-cr ()
+  ;; capture-pane separates rows with a bare LF, which the VT engine
+  ;; renders as a staircase.
+  (let ((fed nil) (buf nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-file)
+                   (lambda (&rest _) (insert "one\ntwo\n\n") 0))
+                  ((symbol-function 'ghostel--init-buffer) #'ignore)
+                  ((symbol-function 'ghostel--write-vt)
+                   (lambda (_term data) (setq fed data)))
+                  ((symbol-function 'ghostel--invalidate) #'ignore)
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (b &rest _) (setq buf b))))
+          (ghostel-tmux-capture "s:0.0")
+          (should (equal fed "one\r\ntwo")))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (provide 'ghostel-tmux-test)
 

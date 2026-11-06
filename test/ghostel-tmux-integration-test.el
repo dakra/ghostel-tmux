@@ -37,7 +37,7 @@ while IFS= read -r line; do
     display-message*)
       printf '%%begin %d %d 1\\r\\n3.4\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     list-windows*)
-      printf '%%begin %d %d 1\\r\\n@0\\tmain\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\r\\n@0\\t%%0\\tmain\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     capture-pane*)
       printf '%%begin %d %d 1\\r\\nHISTORY_LINE_ONE\\r\\nVISIBLE_PROMPT$ \\r\\n%%end %d %d 1\\r\\n' $i $i $i $i
       printf '%%output %%0 BANNER_FROM_LIVE\\r\\n' ;;
@@ -146,6 +146,32 @@ SPEC is (BUFFER TERM)."
             (should-not ghostel-tmux--dcs-active)
             (should (equal name (buffer-name)))))
       (ghostel-tmux-takeover-mode -1))))
+
+(ert-deftest ghostel-tmux-integration-resize-keeps-repainted-prompt ()
+  "A prompt the shell repaints after a pane resize stays on screen."
+  :tags '(native)
+  (ghostel-tmux-integration-test--with-host (pane term)
+    (set-window-buffer (selected-window) pane)
+    (let ((prompt "\e]133;A\e\\PROMPT> \e]133;B\e\\"))
+      (ghostel--write-vt term (concat "output\r\n" prompt))
+      (ghostel--redraw-now pane)
+      (ghostel-tmux--resize-pane 20 80)
+      ;; tmux resized the pane and the shell repainted its prompt.
+      (ghostel--write-vt term (concat "\r\e[K" prompt))
+      (ghostel--redraw-now pane)
+      (should (string-match-p "PROMPT>" (ghostel--copy-all-text term))))))
+
+(ert-deftest ghostel-tmux-integration-sealed-pane-reports-no-focus ()
+  "A sealed pane whose program asked for focus reports sends none."
+  :tags '(native)
+  (ghostel-tmux-integration-test--with-host (pane term)
+    (let ((sent nil))
+      (setq ghostel-pty-out-function (lambda (data) (push data sent)))
+      (ghostel--write-vt term "\e[?1004h")
+      (ghostel--focus-event term t)
+      (should (equal sent '("\e[I")))
+      (ghostel-tmux--seal-pane-buffer pane)
+      (should-not (ghostel--focus-event term nil)))))
 
 (provide 'ghostel-tmux-integration-test)
 
