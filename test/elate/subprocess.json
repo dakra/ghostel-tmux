@@ -90,9 +90,22 @@
     {"wait": "until", "pred": "(and (equal (elate-tmux-q \"#{window_index}\" \"d4\") \"0\") (equal (elate-tmux-id) elate-w0b) (elate-tmux-sync-p))", "comment": "the selection reaches our session, not the grouped one that was active last"},
     {"keys": "C-c C-n"},
     {"wait": "until", "pred": "(and (equal (elate-tmux-q \"#{window_index}\" \"d4\") \"1\") (elate-tmux-sync-p))"},
+
+    {"group": "scripted window", "comment": "a window made and split in one go keeps the pane tmux left active, here not the first"},
+    {"eval": "(progn (elate-tmux-call \"new-window\" \"-t\" \"d4\" \";\" \"split-window\" \"-t\" \"d4\") t)"},
+    {"wait": "until", "pred": "(and (equal (elate-tmux-q \"#{window_index}\" \"d4\") \"2\") (elate-tmux-sync-p))"},
+    {"wait": "until", "pred": "(equal (elate-tmux-q \"#{window_zoomed_flag}\" \"d4\") \"1\")"},
+    {"assert": {"eval": "(equal (elate-tmux-q \"#{pane_index}\" \"d4\") \"1\")"}},
+
+    {"group": "switch client", "comment": "a client moved to a session of another size shows its active pane, here not the first, and leaves that pane active"},
+    {"eval": "(progn (elate-tmux-call \"new-session\" \"-d\" \"-s\" \"d5\" \"-x\" \"70\" \"-y\" \"20\") (elate-tmux-call \"split-window\" \"-t\" \"d5\") (setq elate-cur (elate-tmux-q \"#{pane_id}\" \"d5\")) (ghostel-tmux--cmd \"switch-client -t d5\") t)"},
+    {"wait": "until", "pred": "(and (elate-tmux-shown) (string-search \":d5:\" (buffer-name)) (elate-tmux-sync-p))"},
+    {"assert": {"eval": "(equal (elate-tmux-id) elate-cur)"}},
+    {"assert": {"eval": "(equal (elate-tmux-q \"#{pane_id}\" \"d5\") elate-cur)"}},
+    {"assert": {"eval": "(equal (elate-tmux-q \"#{session_attached}\" \"d4\") \"0\")"}},
     {"keys": "C-c C-d"},
     {"wait": "until", "pred": "(and (null (elate-tmux-controllers)) (null (elate-tmux-panes)))"},
-    {"eval": "(progn (elate-tmux-call \"kill-session\" \"-t\" \"d4g\") (elate-tmux-call \"kill-session\" \"-t\" \"d4\") t)"},
+    {"eval": "(progn (elate-tmux-call \"kill-session\" \"-t\" \"d4g\") (elate-tmux-call \"kill-session\" \"-t\" \"d4\") (elate-tmux-call \"kill-session\" \"-t\" \"d5\") t)"},
 
     {"group": "new", "comment": "M-x ghostel-tmux-new creates `main', and attaches to it the second time"},
     {"keys": "M-x ghostel-tmux-new RET", "delivery": "events"},

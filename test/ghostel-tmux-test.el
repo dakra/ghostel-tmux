@@ -1652,7 +1652,9 @@ SENT collects the sent lines, newest first."
   "Run BODY in controller CTL, collecting queued commands in SENT."
   (declare (indent 2))
   `(cl-letf (((symbol-function 'ghostel-tmux--queue-command)
-              (lambda (cmd &optional _cont) (push cmd ,sent))))
+              (lambda (cmd &optional _cont) (push cmd ,sent)))
+             ((symbol-function 'ghostel-tmux--cmd)
+              (lambda (cmd) (push cmd ,sent))))
      (with-current-buffer ,ctl ,@body)
      (setq ,sent (nreverse ,sent))))
 
@@ -1747,6 +1749,123 @@ SENT collects the sent lines, newest first."
              "@3\t%7\t0\tn\tbd5b,80x24,0,0,7")
             (should (null followed))
             (should (eql ghostel-tmux--active-pane-id 5)))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
+(defmacro ghostel-tmux-test--with-pending-window (spec &rest body)
+  "Run BODY with `%session-window-changed' pending for window @3.
+SPEC is (FOLLOWED): that variable collects followed panes."
+  (declare (indent 1))
+  `(let ((,(car spec) nil)
+         (pane (generate-new-buffer "*pending*")))
+     (unwind-protect
+         (cl-letf (((symbol-function 'ghostel-tmux--get-or-create-pane)
+                    (lambda (&rest _)
+                      (with-current-buffer pane
+                        (setq-local ghostel-tmux--initialized t))
+                      pane))
+                   ((symbol-function 'ghostel-tmux--follow-active-pane)
+                    (lambda (pid) (push pid ,(car spec)))))
+           (setq ghostel-tmux--session-id 1)
+           (ghostel-tmux--on-session-window-changed 1 3)
+           ,@body)
+       (kill-buffer pane))))
+
+(ert-deftest ghostel-tmux-test-deferred-follow-takes-reported-pane ()
+  ;; `new-window ; split-window': the window's first pane is not the
+  ;; active one.
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-pending-window (followed)
+      (ghostel-tmux--receive-window-rows
+       "@3\t%8\t1\tn\tbd5b,80x24,0,0{40x24,0,0,7,39x24,41,0,8}")
+      (should (eql ghostel-tmux--active-pane-id 8))
+      (should (eql (car followed) 8))
+      (should-not ghostel-tmux--pending-follow-wid))))
+
+(ert-deftest ghostel-tmux-test-deferred-follow-waits-for-window-rows ()
+  ;; A layout alone does not say which pane is active.
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-pending-window (followed)
+      (ghostel-tmux--on-layout-change 3 "bd5b,80x24,0,0,7")
+      (should (null followed))
+      (should (eql ghostel-tmux--pending-follow-wid 3)))))
+
+(ert-deftest ghostel-tmux-test-session-switch-keeps-the-window ()
+  ;; `switch-client': the panes shown are wiped; their Emacs window
+  ;; goes on to the new session's pane.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*switch-pane*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) pane)
+            (puthash 5 pane ghostel-tmux--panes)
+            (setq ghostel-tmux--session-id 1)
+            (ghostel-tmux--on-session-changed 2 "other")
+            (should (eq ghostel-tmux--auto-host-window (selected-window))))
+        (when (buffer-live-p pane) (kill-buffer pane))))))
+
+(ert-deftest ghostel-tmux-test-session-switch-prefers-selected-window ()
+  (ghostel-tmux-test--with-controller ctl
+    (let ((a (generate-new-buffer "*switch-a*"))
+          (b (generate-new-buffer "*switch-b*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (let ((other (split-window)))
+              (set-window-buffer (selected-window) a)
+              (set-window-buffer other b)
+              (puthash 5 a ghostel-tmux--panes)
+              (puthash 6 b ghostel-tmux--panes)
+              (should (eq (ghostel-tmux--pane-window) (selected-window)))
+              (select-window other)
+              (with-current-buffer ctl
+                (should (eq (ghostel-tmux--pane-window) other)))))
+        (when (buffer-live-p a) (kill-buffer a))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest ghostel-tmux-test-second-session-switch-keeps-the-window ()
+  ;; Two `%session-changed' back to back: no panes are left for the
+  ;; second one to find.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*switch-pane*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) pane)
+            (puthash 5 pane ghostel-tmux--panes)
+            (setq ghostel-tmux--session-id 1)
+            (ghostel-tmux--on-session-changed 2 "other")
+            (ghostel-tmux--on-session-changed 3 "third")
+            (should (eq ghostel-tmux--auto-host-window (selected-window))))
+        (when (buffer-live-p pane) (kill-buffer pane))))))
+
+(ert-deftest ghostel-tmux-test-host-window-waits-for-window-rows ()
+  ;; A window of another size sends `%layout-change' right after
+  ;; `%session-changed', before the rows name the active pane.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((shown nil)
+          (a (generate-new-buffer "*wait-a*"))
+          (b (generate-new-buffer "*wait-b*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-tmux--get-or-create-pane)
+                     (lambda (_ctl pid _wid _name)
+                       (puthash pid (if (eql pid 1) a b) ghostel-tmux--panes)
+                       (with-current-buffer (gethash pid ghostel-tmux--panes)
+                         (setq-local ghostel-tmux--initialized t))
+                       (gethash pid ghostel-tmux--panes)))
+                    ((symbol-function 'ghostel-tmux--follow-active-pane) #'ignore)
+                    ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                     (lambda (buf _window) (push buf shown))))
+            (setq ghostel-tmux--auto-host-window (selected-window))
+            (let ((layout "bd5b,80x24,0,0{40x24,0,0,1,39x24,41,0,2}"))
+              (ghostel-tmux--on-layout-change 2 layout)
+              (should (null shown))
+              (should ghostel-tmux--auto-host-window)
+              (ghostel-tmux--receive-window-rows
+               (format "@2\t%%2\t1\tw\t%s" layout) t))
+            (should (equal shown (list b)))
+            (should (eql ghostel-tmux--active-pane-id 2)))
         (kill-buffer a)
         (kill-buffer b)))))
 

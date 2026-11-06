@@ -205,7 +205,8 @@ then leaked into the next shell prompt as if typed.")
   "When non-nil, the window to redirect the first pane buffer into.
 Set on entry to control mode in an auto-takeover host so that the
 materialized pane displaces the host's view in the same window —
-matching the experience of running tmux in a normal terminal.")
+matching the experience of running tmux in a normal terminal — and on
+a switch to another session, whose panes replace the ones shown.")
 
 (defvar-local ghostel-tmux--dcs-active nil
   "Non-nil when this buffer is currently inside a tmux DCS frame.
@@ -747,6 +748,20 @@ the capture snapshot."
                 (ghostel--write-vt ghostel--term decoded)))
             (ghostel--invalidate)))))))
 
+(defun ghostel-tmux--pane-window ()
+  "Return a visible window showing a pane of this controller, or nil.
+The selected window comes first."
+  (let ((shown (window-buffer))
+        window)
+    (when ghostel-tmux--panes
+      (maphash (lambda (_pid buf)
+                 (cond
+                  ((eq buf shown) (setq window (selected-window)))
+                  ((null window)
+                   (setq window (get-buffer-window buf 'visible)))))
+               ghostel-tmux--panes))
+    window))
+
 (defun ghostel-tmux--on-session-changed (sid name)
   "Handle `%session-changed $SID NAME'."
   (let ((first (null ghostel-tmux--session-id))
@@ -758,7 +773,10 @@ the capture snapshot."
      (first
       (ghostel-tmux--initial-bootstrap))
      (changed
-      ;; Switching sessions resets pane state.  Wipe and reload.
+      ;; Switching sessions resets pane state.  Wipe and reload; the
+      ;; Emacs window goes on showing the new session.
+      (setq ghostel-tmux--auto-host-window
+            (or (ghostel-tmux--pane-window) ghostel-tmux--auto-host-window))
       (ghostel-tmux--wipe-panes)
       (ghostel-tmux--bootstrap-windows)))))
 
@@ -830,10 +848,11 @@ the capture snapshot."
 
 (defun ghostel-tmux--follow-active-pane (new-pid)
   "Redirect an Emacs window showing a sibling pane to NEW-PID.
-Tmux's active pane is the source of truth — every Emacs-side pane
-switch happens here in response to a `%window-pane-changed'
-notification (or to a deferred re-trigger from `--on-layout-change'
-when the notification raced ahead of the pane buffer's creation).
+Runs for every switch tmux reports: `%window-pane-changed',
+`%session-window-changed', or a deferred re-trigger from
+`--on-layout-change' when a report raced ahead of the pane buffer's
+creation.  A switch made in Emacs reaches tmux through
+`--select-pane', and its report then finds the pane already shown.
 A pane some window already shows leaves the other windows alone."
   (let* ((new-buf (and new-pid ghostel-tmux--panes
                        (gethash new-pid ghostel-tmux--panes)))
@@ -944,29 +963,32 @@ deferred follow — `--on-layout-change' picks it up."
             (setq ghostel-tmux--bootstrap-pending t)
             (ghostel-tmux--bootstrap-pane controller pid)))))
     ;; In auto-takeover mode, redirect the host's window to tmux's active
-    ;; pane so the user keeps seeing tmux in "their" buffer.
-    (when (and ghostel-tmux--auto-host-window
-               (window-live-p ghostel-tmux--auto-host-window)
-               pane-ids
-               (or (null ghostel-tmux--current-window-id)
-                   (eql wid ghostel-tmux--current-window-id)))
-      (let* ((pid (if (memq ghostel-tmux--active-pane-id pane-ids)
-                      ghostel-tmux--active-pane-id
-                    (car pane-ids)))
-             (pane (gethash pid ghostel-tmux--panes))
-             (target-window ghostel-tmux--auto-host-window))
-        (setq ghostel-tmux--auto-host-window nil)
-        (when (buffer-live-p pane)
-          (ghostel-tmux--display-pane-in-window pane target-window))))
+    ;; pane so the user keeps seeing tmux in "their" buffer.  A layout
+    ;; alone does not say which pane that is: wait for the window's rows.
+    (let ((recorded (plist-get (gethash wid ghostel-tmux--windows)
+                               :active-pane)))
+      (when (and ghostel-tmux--auto-host-window
+                 (window-live-p ghostel-tmux--auto-host-window)
+                 (eql wid ghostel-tmux--current-window-id)
+                 (memq recorded pane-ids))
+        (let ((pane (gethash recorded ghostel-tmux--panes))
+              (target-window ghostel-tmux--auto-host-window))
+          (setq ghostel-tmux--auto-host-window nil
+                ghostel-tmux--active-pane-id recorded)
+          (when (buffer-live-p pane)
+            (ghostel-tmux--display-pane-in-window pane target-window)))))
     ;; Deferred follow: `%session-window-changed' fired for this WID
     ;; before its panes existed (typical for new-window — the
     ;; session-window-changed arrives before window-add + list-windows
-    ;; materialize the layout).  Now that buffers exist, follow.
-    (when (and pane-ids (eql ghostel-tmux--pending-follow-wid wid))
-      (setq ghostel-tmux--pending-follow-wid nil)
-      (let ((target (car pane-ids)))
-        (setq ghostel-tmux--active-pane-id target)
-        (ghostel-tmux--follow-active-pane target)))
+    ;; materialize the layout).  Follow once those rows have told which
+    ;; pane tmux has active.
+    (let ((recorded (plist-get (gethash wid ghostel-tmux--windows)
+                               :active-pane)))
+      (when (and (eql ghostel-tmux--pending-follow-wid wid)
+                 (memq recorded pane-ids))
+        (setq ghostel-tmux--pending-follow-wid nil
+              ghostel-tmux--active-pane-id recorded)
+        (ghostel-tmux--follow-active-pane recorded)))
     ;; Also catch the within-window race: `%window-pane-changed'
     ;; arrived before `%layout-change' created the pane buffer.
     (when (and ghostel-tmux--active-pane-id
@@ -1272,8 +1294,8 @@ control-mode commands sent over the active controller.")
 (defun ghostel-tmux--cycle-window (direction)
   "Ask tmux to make the next/previous window active.
 DIRECTION is +1 (next) or -1 (previous).  The visible switch
-happens reactively via `%window-pane-changed' → `--on-window-pane-changed'
-once tmux acks the `select-window'."
+happens reactively in `--on-session-window-changed' once tmux acks
+the `select-window'."
   (let ((controller ghostel-tmux--controller-buffer)
         (cur-wid ghostel-tmux--window-id))
     (unless (and controller (buffer-live-p controller) cur-wid)
@@ -1716,15 +1738,22 @@ a pane in a full-height Emacs window."
               (ghostel-tmux--select-pane window-id pane-id)
               (ghostel-tmux--ensure-pane-zoomed window-id pane-id))))))))
 
+(defun ghostel-tmux--send-selection (controller window-id pane-id)
+  "Ask tmux, through CONTROLLER, for PANE-ID in window WINDOW-ID.
+The pane goes first, so that `%session-window-changed' finds it recorded
+as the window's active pane."
+  (ghostel-tmux--cmd (format "select-pane -t %%%d" pane-id))
+  (when window-id
+    (ghostel-tmux--cmd
+     (ghostel-tmux--select-window-command controller window-id))))
+
 (defun ghostel-tmux--select-pane (window-id pane-id)
   "Ask tmux to switch to PANE-ID in window WINDOW-ID, which Emacs now shows.
 Does nothing for `ghostel-tmux--active-pane-id', the pane tmux already
 has: answering its report with a selection would chase a newer
 selection forever."
   (unless (eql pane-id ghostel-tmux--active-pane-id)
-    (ghostel-tmux--queue-command (format "select-pane -t %%%d" pane-id))
-    (ghostel-tmux--queue-command
-     (ghostel-tmux--select-window-command (current-buffer) window-id))
+    (ghostel-tmux--send-selection (current-buffer) window-id pane-id)
     (setq ghostel-tmux--current-window-id window-id
           ghostel-tmux--active-pane-id pane-id)))
 
@@ -1912,10 +1941,7 @@ The visible switch follows tmux's reports."
       (when (and wid (buffer-live-p controller))
         (with-current-buffer controller
           (ghostel-tmux--cancel-zooming wid pid)))
-      (ghostel-tmux--cmd (format "select-pane -t %%%d" pid))
-      (when wid
-        (ghostel-tmux--cmd
-         (ghostel-tmux--select-window-command controller wid))))))
+      (ghostel-tmux--send-selection controller wid pid))))
 
 ;;;###autoload
 (defun ghostel-tmux-switch-pane ()
