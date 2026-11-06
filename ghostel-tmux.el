@@ -46,7 +46,6 @@
 
 (declare-function ghostel--write-vt "ghostel-module" (term data))
 (declare-function ghostel--write-pty "ghostel-module" (term data))
-(declare-function ghostel--control-mode-reset "ghostel-module" (term))
 
 (defvar ghostel-control-mode-function)
 
@@ -486,25 +485,22 @@ for a wedged parser."
                         (and (or (derived-mode-p 'ghostel-tmux-control-mode)
                                  ghostel-tmux--dcs-active)
                              (current-buffer)))))
-    (if (not (buffer-live-p controller))
-        ;; No Elisp state, but the native parser may still be mid-frame
-        ;; (takeover declined); drop the frame so VT flows again.
-        (progn
-          (when ghostel--term (ghostel--control-mode-reset ghostel--term))
-          (message "Ghostel-tmux: DCS state reset"))
-      (with-current-buffer controller
-        (cond
-         (ghostel-tmux--dcs-active
-          (setq ghostel-tmux--dcs-active nil)
-          (ghostel-tmux--exit-control-mode controller)
-          (when ghostel--term
-            (ghostel--control-mode-reset ghostel--term)))
-         (t
-          (when (and ghostel-tmux--controller-process
-                     (process-live-p ghostel-tmux--controller-process))
-            (delete-process ghostel-tmux--controller-process))
-          (ghostel-tmux--seal-panes controller)
-          (message "Ghostel-tmux: Session reset; pane buffers sealed")))))))
+    (unless (buffer-live-p controller)
+      (user-error "Ghostel-tmux: No active controller for this buffer"))
+    (with-current-buffer controller
+      (cond
+       (ghostel-tmux--dcs-active
+        (setq ghostel-tmux--dcs-active nil)
+        (ghostel-tmux--exit-control-mode controller)
+        ;; An empty line makes tmux leave control mode and close the DCS.
+        (when ghostel--term
+          (ghostel--write-pty ghostel--term "\n")))
+       (t
+        (when (and ghostel-tmux--controller-process
+                   (process-live-p ghostel-tmux--controller-process))
+          (delete-process ghostel-tmux--controller-process))
+        (ghostel-tmux--seal-panes controller)
+        (message "Ghostel-tmux: Session reset; pane buffers sealed"))))))
 
 
 ;; Notification dispatch

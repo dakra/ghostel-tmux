@@ -1530,10 +1530,10 @@
 (ert-deftest ghostel-tmux-test-reset-from-auto-takeover-host ()
   ;; `M-x ghostel-tmux-reset' on an auto-takeover host clears
   ;; control state, calls `--exit-control-mode' to seal panes and
-  ;; restore the host buffer name, and drops the in-progress native DCS
-  ;; frame via `ghostel--control-mode-reset'.
+  ;; restore the host buffer name, and sends tmux the empty line that
+  ;; makes it leave control mode.
   (let ((buf (generate-new-buffer "*reset-host*"))
-        exited-buf reset-term)
+        exited-buf sent)
     (unwind-protect
         (with-current-buffer buf
           (ghostel-mode)
@@ -1542,13 +1542,17 @@
                 ghostel--term 'fake-term)
           (cl-letf (((symbol-function 'ghostel-tmux--exit-control-mode)
                      (lambda (b) (setq exited-buf b)))
-                    ((symbol-function 'ghostel--control-mode-reset)
-                     (lambda (term) (setq reset-term term))))
+                    ((symbol-function 'ghostel--write-pty)
+                     (lambda (term data) (setq sent (cons term data)))))
             (ghostel-tmux-reset))
           (should-not ghostel-tmux--dcs-active)
           (should (eq exited-buf buf))
-          (should (eq reset-term 'fake-term)))
+          (should (equal sent '(fake-term . "\n"))))
       (kill-buffer buf))))
+
+(ert-deftest ghostel-tmux-test-reset-without-session-errors ()
+  (with-temp-buffer
+    (should-error (ghostel-tmux-reset) :type 'user-error)))
 
 (provide 'ghostel-tmux-test)
 

@@ -58,21 +58,19 @@
     {"eval": "(with-current-buffer \"*ghostel*\" (ghostel-send-string \"echo BA''CK-OK\\n\"))"},
     {"wait": "text", "pattern": "^BACK-OK$", "buffer": "*ghostel*", "timeout": 15},
 
-    {"group": "reset", "comment": "re-attach, then M-x ghostel-tmux-reset from the pane: the native frame is dropped, so tmux's own reply text renders in the host as VT"},
+    {"group": "reset", "comment": "re-attach, then M-x ghostel-tmux-reset from the pane: the empty line it sends makes tmux detach and close the DCS, so the host shell prompt comes back"},
     {"eval": "(with-current-buffer \"*ghostel*\" (ghostel-send-string \"tmux -CC -L gt-{{variant}} attach -t t1\\n\"))"},
     {"wait": "until", "pred": "(and (elate-tmux--pane) (buffer-local-value 'ghostel-tmux--initialized (elate-tmux--pane)) t)", "timeout": 20},
     {"assert": {"eval": "(string-match-p \"^RED ok$\" (elate-tmux--pane-text))"}},
     {"eval": "(with-current-buffer (elate-tmux--pane) (ghostel-tmux-reset))"},
     {"wait": "until", "pred": "(and (get-buffer \"*ghostel*\") (not (elate-tmux--host)))", "timeout": 10},
-    {"eval": "(with-current-buffer \"*ghostel*\" (ghostel-send-string \"display-message -p RESET-FL''OW-OK\\n\"))"},
-    {"wait": "text", "pattern": "RESET-FLOW-OK", "buffer": "*ghostel*", "timeout": 15},
-    {"eval": "(with-current-buffer \"*ghostel*\" (ghostel-send-string \"detach-client\\n\"))"},
+    {"wait": "until", "pred": "(with-current-buffer \"*ghostel*\" (save-excursion (goto-char (point-max)) (skip-chars-backward \" \\n\") (memq (char-before) (list ?$ ?% ?>))))", "timeout": 15},
     {"eval": "(with-current-buffer \"*ghostel*\" (ghostel-send-string \"echo AF''TER-OK\\n\"))"},
     {"wait": "text", "pattern": "^AFTER-OK$", "buffer": "*ghostel*", "timeout": 15},
 
     {"group": "cleanup"},
     {"eval": "(with-current-buffer \"*ghostel*\" (ghostel-send-string \"tmux -L gt-{{variant}} kill-server\\n\"))"},
-    {"wait": "idle", "min_idle": 0.5, "timeout": 10},
+    {"wait": "until", "pred": "(not (eql 0 (call-process \"tmux\" nil nil nil \"-L\" \"gt-{{variant}}\" \"has-session\")))", "timeout": 10},
     {"assert": {"eval": "(null (elate-tmux--host))"}}
   ]
 }
