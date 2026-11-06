@@ -37,7 +37,7 @@ while IFS= read -r line; do
     display-message*)
       printf '%%begin %d %d 1\\r\\n3.4\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     list-windows*)
-      printf '%%begin %d %d 1\\r\\n@0\\t%%0\\tmain\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\r\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     capture-pane*)
       printf '%%begin %d %d 1\\r\\nHISTORY_LINE_ONE\\r\\nVISIBLE_PROMPT$ \\r\\n%%end %d %d 1\\r\\n' $i $i $i $i
       printf '%%output %%0 BANNER_FROM_LIVE\\r\\n' ;;

@@ -148,13 +148,18 @@ matching `%end' arrives; or with nil when an `%error' is received.")
   "Hash table mapping integer pane-id (e.g. %3 -> 3) to its buffer.")
 
 (defvar-local ghostel-tmux--windows nil
-  "Hash table mapping integer window-id to plist (:name :panes :layout).")
+  "Hash table mapping integer window-id to a plist.
+Its keys are :name, :panes, :layout, :active-pane (tmux's active pane
+of that window) and :zooming (see `ghostel-tmux--ensure-pane-zoomed').")
 
 (defvar-local ghostel-tmux--window-order nil
   "List of integer window-ids in display order.")
 
+(defvar-local ghostel-tmux--current-window-id nil
+  "Window id of the session's current window in tmux, or nil before known.")
+
 (defvar-local ghostel-tmux--active-pane-id nil
-  "Pane id of the tmux-side active pane, or nil before known.")
+  "Pane id of the active pane of the session's current window, or nil.")
 
 (defvar-local ghostel-tmux--pending-follow-wid nil
   "Window id whose active pane we should follow once it materializes.
@@ -757,6 +762,10 @@ the capture snapshot."
       (ghostel-tmux--wipe-panes)
       (ghostel-tmux--bootstrap-windows)))))
 
+(defconst ghostel-tmux--window-row-format
+  "#{window_id}\\t#{pane_id}\\t#{window_active}\\t#{window_name}\\t#{window_layout}"
+  "The `list-windows -F' format that `--receive-window-rows' parses.")
+
 (defun ghostel-tmux--on-window-add (wid)
   "Handle `%window-add @WID': fetch its layout and create panes."
   (unless (gethash wid ghostel-tmux--windows)
@@ -765,8 +774,8 @@ the capture snapshot."
       (setq ghostel-tmux--window-order
             (append ghostel-tmux--window-order (list wid)))))
   (ghostel-tmux--queue-command
-   (format "list-windows -F \"#{window_id}\\t#{pane_id}\\t#{window_name}\\t#{window_layout}\" -t @%d"
-           wid)
+   (format "list-windows -F \"%s\" -t @%d"
+           ghostel-tmux--window-row-format wid)
    (lambda (output)
      (when output
        (ghostel-tmux--receive-window-rows output)))))
@@ -848,45 +857,49 @@ A pane some window already shows leaves the other windows alone."
 
 (defun ghostel-tmux--on-window-pane-changed (wid pid)
   "Handle `%window-pane-changed @WID %PID': record and follow.
-Fires when tmux's active pane changes *within* a window (e.g.
-`select-pane', `C-t o', kill-pane auto-survivor pick).  Switching
-between windows is signalled by `%session-window-changed' and
-handled separately.  We also remember each window's active pane
-so `--on-session-window-changed' can restore it on cycle-window."
-  (setq ghostel-tmux--active-pane-id pid)
-  (let ((entry (and wid (gethash wid ghostel-tmux--windows))))
+Fires when tmux's active pane changes *within* a window (e.g. `select-pane',
+`C-t o', kill-pane auto-survivor pick), in any window of the server.
+Each window's active pane is remembered so `--on-session-window-changed' can
+restore it on cycle-window; only a change in the session's current window moves
+the view.  Switching between windows is signalled by `%session-window-changed'
+and handled separately."
+  (let ((entry (gethash wid ghostel-tmux--windows)))
     (when entry
       (puthash wid (plist-put entry :active-pane pid)
                ghostel-tmux--windows)))
-  (ghostel-tmux--follow-active-pane pid))
+  (when (eql wid ghostel-tmux--current-window-id)
+    (setq ghostel-tmux--active-pane-id pid)
+    (ghostel-tmux--follow-active-pane pid)))
 
 (defun ghostel-tmux--on-session-window-changed (sid wid)
   "Handle `%session-window-changed $SID @WID': follow the new window.
-Fires when tmux's active window in the session changes (`C-t c',
-`C-t n', `C-t 0'..`9', external `select-window').  Tmux does NOT
-emit `%window-pane-changed' for these events — the per-window
-active pane is preserved, so the active-pane id doesn't change in
-tmux's view; only the *session*'s current window does.
+Fires when a session's current window changes (`C-t c', `C-t n',
+`C-t 0'..`9', external `select-window'), for every session on the
+server; other sessions are ignored.  Tmux does NOT emit
+`%window-pane-changed' for these events — the per-window active pane
+is preserved; only the *session*'s current window changes.
 
 If the target window already has materialized panes, follow the
-recorded active pane.  Without one, take the first pane and select
-it so tmux agrees.  Otherwise mark the
-window for deferred follow — `--on-layout-change' picks it up."
-  (ignore sid)
-  (let* ((entry (gethash wid ghostel-tmux--windows))
-         (panes (and entry (plist-get entry :panes)))
-         (recorded (and entry (plist-get entry :active-pane)))
-         (known (and recorded (memq recorded panes) recorded))
-         (target (or known (car panes)))
-         (buf (and target (gethash target ghostel-tmux--panes))))
-    (cond
-     ((buffer-live-p buf)
-      (setq ghostel-tmux--active-pane-id target)
-      (unless known
-        (ghostel-tmux--queue-command (format "select-pane -t %%%d" target)))
-      (ghostel-tmux--follow-active-pane target))
-     (t
-      (setq ghostel-tmux--pending-follow-wid wid)))))
+recorded active pane.  Without a recorded one, take the first pane and
+select it so tmux agrees.  A window without panes yet is marked for
+deferred follow — `--on-layout-change' picks it up."
+  (when (eql sid ghostel-tmux--session-id)
+    (setq ghostel-tmux--current-window-id wid
+          ghostel-tmux--pending-follow-wid nil)
+    (let* ((entry (gethash wid ghostel-tmux--windows))
+           (panes (and entry (plist-get entry :panes)))
+           (recorded (and entry (plist-get entry :active-pane)))
+           (known (and recorded (memq recorded panes) recorded))
+           (target (or known (car panes)))
+           (buf (and target (gethash target ghostel-tmux--panes))))
+      (cond
+       ((buffer-live-p buf)
+        (setq ghostel-tmux--active-pane-id target)
+        (unless known
+          (ghostel-tmux--queue-command (format "select-pane -t %%%d" target)))
+        (ghostel-tmux--follow-active-pane target))
+       (t
+        (setq ghostel-tmux--pending-follow-wid wid))))))
 
 (defun ghostel-tmux--on-layout-change (wid layout)
   "Handle `%layout-change @WID LAYOUT' — reconcile panes."
@@ -930,16 +943,21 @@ window for deferred follow — `--on-layout-change' picks it up."
                       ghostel-tmux--bootstrap-pending)
             (setq ghostel-tmux--bootstrap-pending t)
             (ghostel-tmux--bootstrap-pane controller pid)))))
-    ;; In auto-takeover mode, redirect the host's window to the first pane
-    ;; that materializes so the user keeps seeing tmux in "their" buffer.
+    ;; In auto-takeover mode, redirect the host's window to tmux's active
+    ;; pane so the user keeps seeing tmux in "their" buffer.
     (when (and ghostel-tmux--auto-host-window
                (window-live-p ghostel-tmux--auto-host-window)
-               pane-ids)
-      (let* ((first-pane (gethash (car pane-ids) ghostel-tmux--panes))
+               pane-ids
+               (or (null ghostel-tmux--current-window-id)
+                   (eql wid ghostel-tmux--current-window-id)))
+      (let* ((pid (if (memq ghostel-tmux--active-pane-id pane-ids)
+                      ghostel-tmux--active-pane-id
+                    (car pane-ids)))
+             (pane (gethash pid ghostel-tmux--panes))
              (target-window ghostel-tmux--auto-host-window))
         (setq ghostel-tmux--auto-host-window nil)
-        (when (buffer-live-p first-pane)
-          (ghostel-tmux--display-pane-in-window first-pane target-window))))
+        (when (buffer-live-p pane)
+          (ghostel-tmux--display-pane-in-window pane target-window))))
     ;; Deferred follow: `%session-window-changed' fired for this WID
     ;; before its panes existed (typical for new-window — the
     ;; session-window-changed arrives before window-add + list-windows
@@ -959,7 +977,8 @@ window for deferred follow — `--on-layout-change' picks it up."
 (defun ghostel-tmux--on-exit (reason)
   "Handle `%exit' from tmux, recording REASON if given."
   (setq ghostel-tmux--exit-reason (or reason "")
-        ghostel-tmux--closing t)
+        ghostel-tmux--closing t
+        ghostel-tmux--command-queue nil)
   (message "Ghostel-tmux: tmux exited%s"
            (if (and reason (not (string-empty-p reason)))
                (format ": %s" reason)
@@ -980,31 +999,44 @@ window for deferred follow — `--on-layout-change' picks it up."
 (defun ghostel-tmux--bootstrap-windows ()
   "Fetch the current session's window list and seed pane buffers."
   (ghostel-tmux--queue-command
-   "list-windows -F \"#{window_id}\\t#{pane_id}\\t#{window_name}\\t#{window_layout}\""
+   (format "list-windows -F \"%s\"" ghostel-tmux--window-row-format)
    (lambda (output)
      (when output
-       (ghostel-tmux--receive-window-rows output)))))
+       (ghostel-tmux--receive-window-rows output t)))))
 
-(defun ghostel-tmux--receive-window-rows (output)
+(defun ghostel-tmux--parse-window-row (line)
+  "Return (WID ACTIVE-PANE CURRENT NAME LAYOUT) for `list-windows' LINE, or nil."
+  (when (string-match
+         "\\`@\\([0-9]+\\)\t%\\([0-9]+\\)\t\\([01]\\)\t\\(.*\\)\t\\(.+\\)\\'" line)
+    (list (string-to-number (match-string 1 line))
+          (string-to-number (match-string 2 line))
+          (equal (match-string 3 line) "1")
+          (match-string 4 line)
+          (match-string 5 line))))
+
+(defun ghostel-tmux--receive-window-rows (output &optional seed)
   "Parse `list-windows' OUTPUT and create/update windows + panes.
-Each row is `@WID<TAB>%ACTIVE-PANE<TAB>WINDOW-NAME<TAB>LAYOUT'.  Using
-TAB as the delimiter (rather than space) lets us round-trip window
-names that contain spaces — common with tmux's automatic-rename feature."
-  (dolist (line (split-string output "\n" t))
-    (when (string-match
-           "\\`@\\([0-9]+\\)\t%\\([0-9]+\\)\t\\(.*\\)\t\\(.+\\)\\'" line)
-      (let* ((wid (string-to-number (match-string 1 line)))
-             (active (string-to-number (match-string 2 line)))
-             (name (match-string 3 line))
-             (layout (match-string 4 line)))
-        (let ((entry (plist-put (gethash wid ghostel-tmux--windows)
-                                :name name)))
-          (puthash wid (plist-put entry :active-pane active)
-                   ghostel-tmux--windows))
-        (unless (memq wid ghostel-tmux--window-order)
-          (setq ghostel-tmux--window-order
-                (append ghostel-tmux--window-order (list wid))))
-        (ghostel-tmux--on-layout-change wid layout)))))
+Each row is `@WID<TAB>%ACTIVE-PANE<TAB>CURRENT<TAB>WINDOW-NAME<TAB>LAYOUT'.
+Using TAB as the delimiter (rather than space) lets us round-trip window
+names that contain spaces — common with tmux's automatic-rename feature.
+With SEED, for the reply about the session itself, the rows also give
+the session's current window and its active pane, before any pane is
+created; later changes arrive as notifications."
+  (let ((rows (delq nil (mapcar #'ghostel-tmux--parse-window-row
+                                (split-string output "\n" t)))))
+    (when (and seed (null ghostel-tmux--current-window-id))
+      (when-let* ((row (cl-find-if #'caddr rows)))
+        (setq ghostel-tmux--current-window-id (car row)
+              ghostel-tmux--active-pane-id (cadr row))))
+    (pcase-dolist (`(,wid ,active ,_current ,name ,layout) rows)
+      (let ((entry (plist-put (gethash wid ghostel-tmux--windows)
+                              :name name)))
+        (puthash wid (plist-put entry :active-pane active)
+                 ghostel-tmux--windows))
+      (unless (memq wid ghostel-tmux--window-order)
+        (setq ghostel-tmux--window-order
+              (append ghostel-tmux--window-order (list wid))))
+      (ghostel-tmux--on-layout-change wid layout))))
 
 (defun ghostel-tmux--bootstrap-pane (controller pane-id)
   "Issue one capture-pane on CONTROLLER to backfill PANE-ID.
@@ -1052,6 +1084,8 @@ after the last content line."
     (when ghostel-tmux--windows
       (clrhash ghostel-tmux--windows))
     (setq ghostel-tmux--window-order nil
+          ghostel-tmux--current-window-id nil
+          ghostel-tmux--pending-follow-wid nil
           ghostel-tmux--active-pane-id nil
           ghostel-tmux--viewer-buffer nil)))
 
@@ -1169,6 +1203,16 @@ Used for `-t' on session/window-level commands (`next-window',
            (and ghostel-tmux--session-id
                 (format "$%d" ghostel-tmux--session-id))))))
 
+(defun ghostel-tmux--select-window-command (controller window-id)
+  "Return the command selecting window WINDOW-ID in CONTROLLER's session.
+A bare `@N' resolves to the most recently active session holding the
+window, which can be a session grouped with this one."
+  (let ((sid (and (buffer-live-p controller)
+                  (buffer-local-value 'ghostel-tmux--session-id controller))))
+    (format "select-window -t %s@%d"
+            (if sid (format "$%d:" sid) "")
+            window-id)))
+
 (defun ghostel-tmux--window-target ()
   "Return `@WID' for the current pane's window, or nil."
   (when ghostel-tmux--window-id
@@ -1240,7 +1284,8 @@ once tmux acks the `select-window'."
       (when (and idx (> (length order) 1))
         (let ((next-wid (nth (mod (+ idx direction) (length order))
                              order)))
-          (ghostel-tmux--cmd (format "select-window -t @%d" next-wid)))))))
+          (ghostel-tmux--cmd
+           (ghostel-tmux--select-window-command controller next-wid)))))))
 
 (defun ghostel-tmux--prefix-next-window ()
   "Switch to the next tmux window and display its active pane."
@@ -1543,6 +1588,8 @@ front-end."
           ghostel-tmux--panes (make-hash-table)
           ghostel-tmux--windows (make-hash-table)
           ghostel-tmux--window-order nil
+          ghostel-tmux--current-window-id nil
+          ghostel-tmux--pending-follow-wid nil
           ghostel-tmux--active-pane-id nil
           ghostel-tmux--viewer-buffer nil
           ghostel-tmux--auto-host-window (get-buffer-window buf t))
@@ -1579,6 +1626,8 @@ them are returned to the host buffer so the user lands back at the shell."
           ghostel-tmux--panes nil
           ghostel-tmux--windows nil
           ghostel-tmux--window-order nil
+          ghostel-tmux--current-window-id nil
+          ghostel-tmux--pending-follow-wid nil
           ghostel-tmux--active-pane-id nil)
     (remove-hook 'ghostel-exit-functions #'ghostel-tmux--host-exited t)
     ;; Restore the host buffer's original (visible) name, if we renamed
@@ -1671,23 +1720,61 @@ a pane in a full-height Emacs window."
   "Ask tmux to switch to PANE-ID in window WINDOW-ID, which Emacs now shows.
 Does nothing for `ghostel-tmux--active-pane-id', the pane tmux already
 has: answering its report with a selection would chase a newer
-selection forever.  The first pane shown after attaching leaves the
-session's window alone."
+selection forever."
   (unless (eql pane-id ghostel-tmux--active-pane-id)
     (ghostel-tmux--queue-command (format "select-pane -t %%%d" pane-id))
-    (when ghostel-tmux--active-pane-id
-      (ghostel-tmux--queue-command (format "select-window -t @%d" window-id)))
-    (setq ghostel-tmux--active-pane-id pane-id)))
+    (ghostel-tmux--queue-command
+     (ghostel-tmux--select-window-command (current-buffer) window-id))
+    (setq ghostel-tmux--current-window-id window-id
+          ghostel-tmux--active-pane-id pane-id)))
+
+(defun ghostel-tmux--set-zooming (window-id token)
+  "Record TOKEN as the zoom in progress in window WINDOW-ID."
+  (when-let* ((win (gethash window-id ghostel-tmux--windows)))
+    (puthash window-id (plist-put win :zooming token)
+             ghostel-tmux--windows)))
+
+(defun ghostel-tmux--zooming-p (window-id token)
+  "Non-nil while TOKEN is the zoom in progress in window WINDOW-ID."
+  (eq token (plist-get (gethash window-id ghostel-tmux--windows) :zooming)))
+
+(defun ghostel-tmux--finish-zooming (window-id token)
+  "End the zoom TOKEN in window WINDOW-ID unless a newer one took over."
+  (when (ghostel-tmux--zooming-p window-id token)
+    (ghostel-tmux--set-zooming window-id nil)))
+
+(defun ghostel-tmux--cancel-zooming (window-id pane-id)
+  "Drop a zoom in progress in window WINDOW-ID unless it is of PANE-ID.
+Called when a selection of PANE-ID is queued: `resize-pane -Z' makes
+its pane active, which would undo that selection."
+  (let ((token (plist-get (gethash window-id ghostel-tmux--windows) :zooming)))
+    (when (and token (not (eql (car token) pane-id)))
+      (ghostel-tmux--set-zooming window-id nil))))
 
 (defun ghostel-tmux--ensure-pane-zoomed (window-id pane-id)
   "Ask tmux to zoom PANE-ID in window WINDOW-ID unless the window is zoomed.
-Single-pane windows are skipped: zoom is a no-op there."
-  (let ((win (gethash window-id ghostel-tmux--windows)))
-    (when (and win (> (length (plist-get win :panes)) 1))
+Single-pane windows are skipped: zoom is a no-op there.  `resize-pane -Z'
+toggles, so the window's zoom flag is read first.  The window's :zooming
+entry is a fresh (PANE-ID) token per zoom in progress: a repeat for that
+pane is dropped, as a second toggle would undo the first, and the steps
+of a replaced token do nothing."
+  (let ((win (gethash window-id ghostel-tmux--windows))
+        (token (list pane-id)))
+    (when (and win
+               (> (length (plist-get win :panes)) 1)
+               (not (eql pane-id (car (plist-get win :zooming)))))
+      (ghostel-tmux--set-zooming window-id token)
       (ghostel-tmux--queue-command
-       (format
-        "if-shell -F -t %%%d '#{!=:#{window_zoomed_flag},1}' 'resize-pane -Z -t %%%d'"
-        pane-id pane-id)))))
+       (format "display-message -p -t %%%d '#{window_zoomed_flag}'" pane-id)
+       (lambda (output)
+         (if (and output
+                  (equal (string-trim output) "0")
+                  (ghostel-tmux--zooming-p window-id token))
+             (ghostel-tmux--queue-command
+              (format "resize-pane -Z -t %%%d" pane-id)
+              (lambda (_output)
+                (ghostel-tmux--finish-zooming window-id token)))
+           (ghostel-tmux--finish-zooming window-id token)))))))
 
 (defun ghostel-tmux--display-pane-in-window (pane-buf window)
   "Display PANE-BUF in WINDOW and resize its terminal to fit."
@@ -1708,14 +1795,19 @@ through `ghostel-tmux--display-pane-in-window'."
 
 (defun ghostel-tmux--wait-for-pane (control-buf timeout)
   "Block up to TIMEOUT seconds for CONTROL-BUF to materialize a pane.
-Switches the selected window to the first pane buffer when one appears."
+Switches the selected window to tmux's active pane when one appears,
+or to the first pane while the active one is unknown."
   (let ((target-window (selected-window))
         (deadline (+ (float-time) timeout)))
     (catch 'done
       (while (< (float-time) deadline)
         (let ((panes (ghostel-tmux--pane-list control-buf)))
           (when panes
-            (ghostel-tmux--display-pane-in-window (car panes) target-window)
+            (ghostel-tmux--display-pane-in-window
+             (or (with-current-buffer control-buf
+                   (gethash ghostel-tmux--active-pane-id ghostel-tmux--panes))
+                 (car panes))
+             target-window)
             (throw 'done t)))
         (accept-process-output
          (with-current-buffer control-buf
@@ -1813,11 +1905,17 @@ The visible switch follows tmux's reports."
   "Ask tmux to switch to the pane of PANE-BUF, also across tmux windows.
 The visible switch follows tmux's reports."
   (let ((pid (buffer-local-value 'ghostel-tmux--pane-id pane-buf))
-        (wid (buffer-local-value 'ghostel-tmux--window-id pane-buf)))
+        (wid (buffer-local-value 'ghostel-tmux--window-id pane-buf))
+        (controller (buffer-local-value 'ghostel-tmux--controller-buffer
+                                        pane-buf)))
     (when pid
+      (when (and wid (buffer-live-p controller))
+        (with-current-buffer controller
+          (ghostel-tmux--cancel-zooming wid pid)))
       (ghostel-tmux--cmd (format "select-pane -t %%%d" pid))
       (when wid
-        (ghostel-tmux--cmd (format "select-window -t @%d" wid))))))
+        (ghostel-tmux--cmd
+         (ghostel-tmux--select-window-command controller wid))))))
 
 ;;;###autoload
 (defun ghostel-tmux-switch-pane ()
