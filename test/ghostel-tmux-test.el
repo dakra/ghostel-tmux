@@ -2088,7 +2088,8 @@ tmux resizes that screen when the pane leaves the alternate one."
         (should-error (ghostel-tmux-new "x") :type 'user-error)
         (should-error (ghostel-tmux-capture "%1") :type 'user-error)
         (should (equal (buffer-list) buffers))))
-    (should (= prompted 3))))
+    (should (= prompted 3))
+    (should-not started)))
 
 (ert-deftest ghostel-tmux-test-spawn-honours-a-remote-directory ()
   "tmux runs where the session list came from, on a binary stream."
@@ -3259,6 +3260,157 @@ SPEC is (FOLLOWED): that variable collects followed panes."
             (should-not sent))
         (kill-buffer a)
         (kill-buffer b)))))
+
+;; A floating pane (tmux 3.8) is reported active but is in no layout.
+(defmacro ghostel-tmux-test--with-floating-active-pane (&rest body)
+  "Run BODY with pane 5 tiled in window 0 and floating pane 9 active there."
+  (declare (indent 0))
+  `(let ((tiled (generate-new-buffer "*float-tiled*")))
+     (unwind-protect
+         (cl-letf (((symbol-function 'ghostel-tmux--get-or-create-pane)
+                    (lambda (_ctl pid _wid _name)
+                      (with-current-buffer (gethash pid ghostel-tmux--panes)
+                        (setq-local ghostel-tmux--initialized t))
+                      (gethash pid ghostel-tmux--panes))))
+           (puthash 5 tiled ghostel-tmux--panes)
+           (puthash 0 (list :name "w" :panes (list 5) :active-pane 9)
+                    ghostel-tmux--windows)
+           (setq ghostel-tmux--session-id 1
+                 ghostel-tmux--current-window-id 0)
+           ,@body)
+       (kill-buffer tiled))))
+
+(ert-deftest ghostel-tmux-test-floating-active-pane-fills-the-kept-window ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let (shown)
+        (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                   (lambda (buf _window) (setq shown buf))))
+          (setq ghostel-tmux--auto-host-window (selected-window))
+          (ghostel-tmux--on-layout-change 0 "b25d,80x24,0,0,5")
+          (should (eq shown tiled))
+          (should (eql ghostel-tmux--active-pane-id 5))
+          (should-not ghostel-tmux--auto-host-window))))))
+
+(ert-deftest ghostel-tmux-test-floating-active-pane-ends-a-pending-follow ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let (followed)
+        (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
+                   (lambda (pid) (push pid followed))))
+          (setq ghostel-tmux--pending-follow-wid 0)
+          (ghostel-tmux--on-layout-change 0 "b25d,80x24,0,0,5")
+          (should-not ghostel-tmux--pending-follow-wid)
+          (should (memq 5 followed)))))))
+
+(ert-deftest ghostel-tmux-test-session-window-changed-keeps-a-floating-selection ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let ((sent nil) (followed nil))
+        (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
+                   (lambda (pid) (push pid followed))))
+          (ghostel-tmux-test--with-sent ctl sent
+            (ghostel-tmux--on-session-window-changed 1 0))
+          (should (equal followed '(5)))
+          (should (null sent)))))))
+
+(ert-deftest ghostel-tmux-test-lost-active-pane-leaves-the-kept-window ()
+  ;; A pane that just left the window is not a floating one: the query
+  ;; `--keep-lost-pane-window' asked decides what the window shows.
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let (shown)
+        (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                   (lambda (buf _window) (setq shown buf))))
+          (puthash 0 (list :name "w" :panes (list 5 9) :active-pane 9)
+                   ghostel-tmux--windows)
+          (setq ghostel-tmux--auto-host-window (selected-window))
+          (ghostel-tmux--on-layout-change 0 "b25d,80x24,0,0,5")
+          (should-not shown)
+          (should ghostel-tmux--auto-host-window))))))
+
+(ert-deftest ghostel-tmux-test-joined-pane-without-a-buffer-is-followed ()
+  ;; `join-pane' empties the source window first, so the pane reported
+  ;; active here has no buffer until the layout of this window arrives.
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let ((joined (generate-new-buffer "*float-joined*"))
+            (followed nil))
+        (unwind-protect
+            (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
+                       (lambda (pid) (push pid followed))))
+              (ghostel-tmux--on-session-window-changed 1 0)
+              (should (eql ghostel-tmux--pending-follow-wid 0))
+              (puthash 9 joined ghostel-tmux--panes)
+              (ghostel-tmux--on-layout-change
+               0 "bd5b,80x24,0,0{40x24,0,0,5,39x24,41,0,9}")
+              (should-not ghostel-tmux--pending-follow-wid)
+              (should (eql 9 (car followed))))
+          (kill-buffer joined))))))
+
+(ert-deftest ghostel-tmux-test-moving-active-pane-leaves-the-kept-window ()
+  ;; A pane with a buffer elsewhere is moving in, not floating.
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let ((moving (generate-new-buffer "*float-moving*"))
+            shown)
+        (unwind-protect
+            (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                       (lambda (buf _window) (setq shown buf))))
+              (puthash 9 moving ghostel-tmux--panes)
+              (setq ghostel-tmux--auto-host-window (selected-window))
+              (ghostel-tmux--on-layout-change 0 "b25d,80x24,0,0,5")
+              (should-not shown)
+              (should ghostel-tmux--auto-host-window))
+          (kill-buffer moving))))))
+
+(ert-deftest ghostel-tmux-test-lost-pane-with-a-floating-successor-asks-the-rows ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let (asked)
+        (cl-letf (((symbol-function 'ghostel-tmux--request-window-rows)
+                   (lambda (&rest _) (setq asked t))))
+          (setq ghostel-tmux--auto-host-window (selected-window))
+          (ghostel-tmux--receive-active-pane "%9\n")
+          (should asked))))))
+
+(ert-deftest ghostel-tmux-test-attach-pane-stands-in-for-a-floating-one ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (setq ghostel-tmux--active-pane-id 9)
+      (should (eq tiled (ghostel-tmux--attach-pane)))
+      (should (eql 5 ghostel-tmux--active-pane-id)))))
+
+(ert-deftest ghostel-tmux-test-wait-for-pane-shows-the-stand-in ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let ((other (generate-new-buffer "*float-other*"))
+            shown)
+        (unwind-protect
+            (cl-letf (((symbol-function 'ghostel-tmux--pane-list)
+                       (lambda (_controller) (list other tiled)))
+                      ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                       (lambda (buf _window) (setq shown buf))))
+              (setq ghostel-tmux--active-pane-id 9)
+              (ghostel-tmux--wait-for-pane ctl 0)
+              (should (eq shown tiled)))
+          (kill-buffer other))))))
+
+(ert-deftest ghostel-tmux-test-select-pane-replaces-a-deferred-follow ()
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-sent ctl sent
+        (setq ghostel-tmux--pending-follow-wid 0
+              ghostel-tmux--active-pane-id 9)
+        (ghostel-tmux--select-pane 0 5))
+      (should-not ghostel-tmux--pending-follow-wid))))
+
+(ert-deftest ghostel-tmux-test-attach-pane-leaves-an-unknown-pane-alone ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (setq ghostel-tmux--active-pane-id nil)
+      (should-not (ghostel-tmux--attach-pane))
+      (should-not ghostel-tmux--active-pane-id))))
 
 (ert-deftest ghostel-tmux-test-session-window-changed-other-session ()
   ;; tmux reports this for every session on the server, also for a

@@ -123,6 +123,19 @@ A pane's terminal follows the Emacs windows showing it, like any ghostel
 buffer.  Each new size is sent to tmux with =refresh-client -C cols,rows=,
 so the server lays the panes out for the real client size.
 
+* Floating panes
+
+The floating panes of tmux 3.8 (=new-pane=, =break-pane -W=) are in no window
+layout, so they get no buffer, and a pane that turns floating loses its buffer.
+With a floating pane active, Emacs keeps the tiled pane it shows, or shows the
+window's first tiled pane.  In a window with several tiled panes it zooms that
+pane, which takes the selection from the floating pane and hides it from other
+clients too.
+
+A current window that holds only floating panes has nothing to show: a takeover
+stays on the hidden shell, and =ghostel-tmux-attach= moves the session to a
+window with a tiled pane.
+
 * Customization
 
 | Option                              | Effect                                                                              |
