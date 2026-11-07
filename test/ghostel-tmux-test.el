@@ -2325,6 +2325,72 @@ SPEC is (FOLLOWED): that variable collects followed panes."
         (when (buffer-live-p pane) (kill-buffer pane))
         (kill-buffer next)))))
 
+(ert-deftest ghostel-tmux-test-lost-pane-without-report-asks-tmux ()
+  ;; No report follows when tmux's active pane already was another one.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*dying*"))
+          (next (generate-new-buffer "*next*"))
+          (sent nil))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) pane)
+            (ghostel-tmux-test--with-wire ctl sent
+              (puthash 5 pane ghostel-tmux--panes)
+              (puthash 6 next ghostel-tmux--panes)
+              (setq ghostel-tmux--active-pane-id 5)
+              (ghostel-tmux--remove-pane ctl 5)
+              (should (equal sent '("display-message -p '#{pane_id}'\n")))
+              (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                         (lambda (buf window) (set-window-buffer window buf))))
+                (ghostel-tmux-test--reply ctl "%6\r\n"))
+              (should (eq (window-buffer) next))
+              (should (eql ghostel-tmux--active-pane-id 6))
+              (should-not ghostel-tmux--auto-host-window)))
+        (when (buffer-live-p pane) (kill-buffer pane))
+        (kill-buffer next)))))
+
+(ert-deftest ghostel-tmux-test-lost-pane-answer-after-report-does-nothing ()
+  (ghostel-tmux-test--with-controller ctl
+    (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
+               (lambda (_) (error "Followed"))))
+      (setq ghostel-tmux--active-pane-id 6)
+      (ghostel-tmux--receive-active-pane "%7")
+      (should (eql ghostel-tmux--active-pane-id 6)))))
+
+(ert-deftest ghostel-tmux-test-lost-pane-answer-without-buffer-waits-for-rows ()
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--auto-host-window (selected-window))
+    (ghostel-tmux--receive-active-pane "%7")
+    (should ghostel-tmux--auto-host-window)))
+
+(ert-deftest ghostel-tmux-test-lost-pane-failed-query-gives-up ()
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--auto-host-window (selected-window))
+    (ghostel-tmux--receive-active-pane nil)
+    (should-not ghostel-tmux--auto-host-window)))
+
+(ert-deftest ghostel-tmux-test-session-switch-ignores-active-pane-window ()
+  ;; The active pane is shown in another window than the selected one,
+  ;; which is the window that stays with the session.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((a (generate-new-buffer "*sel*"))
+          (b (generate-new-buffer "*act*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (let ((other (split-window)))
+              (set-window-buffer (selected-window) a)
+              (set-window-buffer other b)
+              (puthash 5 a ghostel-tmux--panes)
+              (puthash 6 b ghostel-tmux--panes)
+              (setq ghostel-tmux--session-id 1
+                    ghostel-tmux--active-pane-id 6)
+              (ghostel-tmux--on-session-changed 2 "other")
+              (should (eq ghostel-tmux--auto-host-window (selected-window)))))
+        (when (buffer-live-p a) (kill-buffer a))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
 (ert-deftest ghostel-tmux-test-background-pane-removal-keeps-no-window ()
   ;; A later switch must not land in the window of a background pane.
   (ghostel-tmux-test--with-controller ctl

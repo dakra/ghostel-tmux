@@ -717,15 +717,34 @@ A nil WINDOW-NAME (we haven't been told yet) is rendered as
       (when buf
         (remhash pane-id ghostel-tmux--panes)
         (when (buffer-live-p buf)
-          ;; tmux names the next active pane after the pane is gone: its
-          ;; window must not end up on an unrelated buffer until then.
           (when (eql pane-id ghostel-tmux--active-pane-id)
-            (setq ghostel-tmux--auto-host-window
-                  (or (get-buffer-window buf 'visible)
-                      ghostel-tmux--auto-host-window)))
+            (ghostel-tmux--keep-lost-pane-window buf))
           (with-current-buffer buf
             (setq ghostel-pty-out-function nil))
           (kill-buffer buf))))))
+
+(defun ghostel-tmux--keep-lost-pane-window (pane-buf)
+  "Keep the window of PANE-BUF, tmux's active pane, which is going away.
+tmux reports the next active pane after the pane is gone, and sends no
+report when its active pane was another one; asking settles both."
+  (when-let* ((window (get-buffer-window pane-buf 'visible)))
+    (setq ghostel-tmux--auto-host-window window)
+    (ghostel-tmux--queue-command "display-message -p '#{pane_id}'"
+                                 #'ghostel-tmux--receive-active-pane)))
+
+(defun ghostel-tmux--receive-active-pane (output)
+  "Follow the active pane in OUTPUT into a window kept for a lost pane.
+A report may have done that already.  A pane without a buffer yet leaves
+the window to the rows on their way; a failed query gives it up."
+  (when ghostel-tmux--auto-host-window
+    (cond
+     ((null output)
+      (setq ghostel-tmux--auto-host-window nil))
+     ((string-match "%\\([0-9]+\\)" output)
+      (let ((pid (string-to-number (match-string 1 output))))
+        (when (and ghostel-tmux--panes (gethash pid ghostel-tmux--panes))
+          (setq ghostel-tmux--active-pane-id pid)
+          (ghostel-tmux--follow-active-pane pid)))))))
 
 (defun ghostel-tmux--pane-list (controller)
   "Return the live pane buffers under CONTROLLER, in window+pane order."
@@ -1127,6 +1146,8 @@ after the last content line."
 (defun ghostel-tmux--wipe-panes ()
   "Drop all pane buffers and reset window state."
   (let ((controller (current-buffer)))
+    ;; These panes are not lost to a successor in this session.
+    (setq ghostel-tmux--active-pane-id nil)
     (when ghostel-tmux--panes
       (maphash (lambda (pid _buf)
                  (ghostel-tmux--remove-pane controller pid))
@@ -1137,7 +1158,6 @@ after the last content line."
     (setq ghostel-tmux--window-order nil
           ghostel-tmux--current-window-id nil
           ghostel-tmux--pending-follow-wid nil
-          ghostel-tmux--active-pane-id nil
           ghostel-tmux--viewer-buffer nil)))
 
 
