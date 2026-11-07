@@ -36,8 +36,6 @@ while IFS= read -r line; do
   case \"$line\" in
     *alternate_on*)
       printf '%%begin %d %d 1\\r\\n0,0,0,16,1,1,1,0,0,0,1,0,0,0,0,0,0,1,2\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
-    display-message*)
-      printf '%%begin %d %d 1\\r\\n3.4\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     list-windows*)
       printf '%%begin %d %d 1\\r\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     capture-pane*)
@@ -160,7 +158,7 @@ SPEC is (BUFFER TERM)."
     (ghostel-tmux-takeover-mode 1)
     (unwind-protect
         (ghostel-tmux-integration-test--with-host (host term)
-          (cl-letf (((symbol-function 'ghostel-tmux--initial-bootstrap)
+          (cl-letf (((symbol-function 'ghostel-tmux--request-window-rows)
                      #'ignore))
             (ghostel--write-vt term "\eP1000p%session-changed $1 gr\303")
             (ghostel-tmux-integration-test--drain)

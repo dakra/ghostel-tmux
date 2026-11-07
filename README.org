@@ -63,7 +63,7 @@ exits, as in any terminal without control-mode support.
 ** Shell wrapper
 
 =shell/= has an optional =tmux= wrapper for bash, zsh, fish and nushell that
-adds =-CC= to the subcommands that attach (=tmux new=, =tmux attach=, =tmux a=,
+adds =-u -CC= to the subcommands that attach (=tmux new=, =tmux attach=, =tmux a=,
 or bare =tmux=) and passes everything else through, also =tmux new -d=, which
 has no client to take over.  Source it in ghostel only:
 
@@ -81,8 +81,8 @@ string match -q 'ghostel*' "$INSIDE_EMACS"; and source /path/to/ghostel-tmux/she
 source /path/to/ghostel-tmux/shell/ghostel-tmux.nu
 #+end_src
 
-Bypass it with =command tmux ...= (=^tmux ...= in nushell) or by setting
-=GHOSTEL_TMUX_NO_CC=.
+Bypass it with =command tmux ...= (=^tmux ...= in nushell), or by setting
+=GHOSTEL_TMUX_NO_CC= before sourcing it (at any time in nushell).
 
 * Prefix bindings
 
