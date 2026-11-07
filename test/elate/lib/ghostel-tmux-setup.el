@@ -45,17 +45,21 @@ Return non-nil when no server is left."
   (unless elate-tmux-dir
     (error "`elate-tmux-init' has not run"))
   (call-process "tmux" nil nil nil "kill-server")
-  (delete-directory elate-tmux-dir t)
-  (not (elate-tmux-server-p)))
+  ;; Without its directory, tmux would ask the default server.
+  (prog1 (not (elate-tmux-server-p))
+    (delete-directory elate-tmux-dir t)))
 
 (defun elate-tmux-server-p ()
   "Non-nil when the private tmux server runs."
   (eql 0 (call-process "tmux" nil nil nil "list-sessions")))
 
 (defun elate-tmux-call (&rest args)
-  "Run tmux with ARGS outside control mode; return its trimmed output."
+  "Run tmux with ARGS outside control mode; return its trimmed output.
+A failure signals an error: its message must not pass for an answer."
   (with-temp-buffer
-    (apply #'call-process "tmux" nil t nil args)
+    (let ((status (apply #'call-process "tmux" nil (list t nil) nil args)))
+      (unless (eql status 0)
+        (error "tmux %s: exit status %s" (car args) status)))
     (string-trim (buffer-string))))
 
 (defun elate-tmux-q (format &optional target)

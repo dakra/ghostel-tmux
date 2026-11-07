@@ -1256,6 +1256,7 @@
             (puthash 0 pane ghostel-tmux--panes)
             (puthash 0 (list :name "sh" :panes (list 0))
                      ghostel-tmux--windows)
+            (setq ghostel-tmux--session-id 0)
             (ghostel-tmux--dispatch-notification "%session-renamed $0 neu")
             (should (equal ghostel-tmux--session-name "neu"))
             (should (equal (buffer-name pane) "*ghostel-tmux:neu:sh%0*")))
@@ -1305,9 +1306,9 @@
   ;; Window names containing spaces (common with auto-rename) must
   ;; round-trip through the tab-delimited list-windows format.
   (ghostel-tmux-test--with-controller ctl
-    (let ((row "@7\t%3\t0\tpython -m foo\tbd5b,80x24,0,0,3"))
+    (let ((row "@7\t%3\t0\tpython -m foo\tbd5b,80x24,0,0,3\t"))
       (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
-                 (lambda (wid layout)
+                 (lambda (wid layout &rest _)
                    (should (= wid 7))
                    (should (equal layout "bd5b,80x24,0,0,3")))))
         (ghostel-tmux--receive-window-rows row))
@@ -1352,7 +1353,7 @@
   ;; The dispatcher must still match and extract the layout.
   (let (seen-wid seen-layout)
     (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
-               (lambda (wid layout)
+               (lambda (wid layout &rest _)
                  (setq seen-wid wid seen-layout layout))))
       (ghostel-tmux--dispatch-notification
        "%layout-change @4 b33d,80x24,0,0,0 b33d,80x24,0,0,0 ")
@@ -1696,12 +1697,12 @@ SENT collects the sent lines, newest first."
   (ghostel-tmux-test--with-controller ctl
     (let ((seen nil))
       (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
-                 (lambda (wid _layout)
+                 (lambda (wid &rest _)
                    (push (list wid ghostel-tmux--current-window-id
                                ghostel-tmux--active-pane-id)
                          seen))))
         (ghostel-tmux--receive-window-rows
-         "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\n@1\t%2\t1\tb\tbd5b,80x24,0,0,2"
+         "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n@1\t%2\t1\tb\tbd5b,80x24,0,0,2\t"
          t))
       (should (equal (reverse seen) '((0 1 2) (1 1 2)))))))
 
@@ -1712,7 +1713,7 @@ SENT collects the sent lines, newest first."
       (setq ghostel-tmux--current-window-id 0
             ghostel-tmux--active-pane-id 0)
       (ghostel-tmux--receive-window-rows
-       "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\n@1\t%2\t1\tb\tbd5b,80x24,0,0,2"
+       "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n@1\t%2\t1\tb\tbd5b,80x24,0,0,2\t"
        t)
       (should (eql ghostel-tmux--current-window-id 0))
       (should (eql ghostel-tmux--active-pane-id 0)))))
@@ -1722,7 +1723,7 @@ SENT collects the sent lines, newest first."
   ;; the old one after a switch, or one grouped with ours.
   (ghostel-tmux-test--with-controller ctl
     (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
-      (ghostel-tmux--receive-window-rows "@3\t%7\t1\ta\tbd5b,80x24,0,0,7")
+      (ghostel-tmux--receive-window-rows "@3\t%7\t1\ta\tbd5b,80x24,0,0,7\t")
       (should-not ghostel-tmux--current-window-id)
       (should-not ghostel-tmux--active-pane-id))))
 
@@ -1749,7 +1750,7 @@ SENT collects the sent lines, newest first."
             (ghostel-tmux--on-session-window-changed 1 0)
             (setq followed nil)
             (ghostel-tmux--receive-window-rows
-             "@3\t%7\t0\tn\tbd5b,80x24,0,0,7")
+             "@3\t%7\t0\tn\tbd5b,80x24,0,0,7\t")
             (should (null followed))
             (should (eql ghostel-tmux--active-pane-id 5)))
         (kill-buffer a)
@@ -1780,7 +1781,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
   (ghostel-tmux-test--with-controller ctl
     (ghostel-tmux-test--with-pending-window (followed)
       (ghostel-tmux--receive-window-rows
-       "@3\t%8\t1\tn\tbd5b,80x24,0,0{40x24,0,0,7,39x24,41,0,8}")
+       "@3\t%8\t1\tn\tbd5b,80x24,0,0{40x24,0,0,7,39x24,41,0,8}\t")
       (should (eql ghostel-tmux--active-pane-id 8))
       (should (eql (car followed) 8))
       (should-not ghostel-tmux--pending-follow-wid))))
@@ -1866,7 +1867,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
               (should (null shown))
               (should ghostel-tmux--auto-host-window)
               (ghostel-tmux--receive-window-rows
-               (format "@2\t%%2\t1\tw\t%s" layout) t))
+               (format "@2\t%%2\t1\tw\t%s\t" layout) t))
             (should (equal shown (list b)))
             (should (eql ghostel-tmux--active-pane-id 2)))
         (kill-buffer a)
@@ -1915,8 +1916,8 @@ SPEC is (FOLLOWED): that variable collects followed panes."
                      (lambda (buf _window) (push buf shown))))
             (setq ghostel-tmux--auto-host-window (selected-window))
             (ghostel-tmux--receive-window-rows
-             (concat "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\n"
-                     "@1\t%3\t1\tb\tbd5b,80x24,0,0{40x24,0,0,2,39x24,41,0,3}")
+             (concat "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n"
+                     "@1\t%3\t1\tb\tbd5b,80x24,0,0{40x24,0,0,2,39x24,41,0,3}\t")
              t)
             (should (equal shown (list c)))
             (should-not ghostel-tmux--auto-host-window))
@@ -2263,6 +2264,120 @@ SPEC is (FOLLOWED): that variable collects followed panes."
                  (lambda (_) (error "Rendered directly"))))
         (ghostel-tmux--commit-hidden-resize))
       (should-not ghostel--repair-pending))))
+
+(ert-deftest ghostel-tmux-test-session-renamed-other-session ()
+  ;; tmux reports this for every session on the server.
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--session-id 0
+          ghostel-tmux--session-name "mine")
+    (ghostel-tmux--dispatch-notification "%session-renamed $1 other")
+    (should (equal ghostel-tmux--session-name "mine"))))
+
+(ert-deftest ghostel-tmux-test-hidden-zoomed-pane-takes-visible-size ()
+  ;; The first layout of a zoomed window has its unzoomed geometry; a
+  ;; pane that is not on screen has only that one.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sizes nil)
+          (panes (list (cons 1 (generate-new-buffer "*zoomed*"))
+                       (cons 2 (generate-new-buffer "*behind*")))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-tmux--get-or-create-pane)
+                     (lambda (_ctl pid _wid _name)
+                       (let ((buf (alist-get pid panes)))
+                         (with-current-buffer buf
+                           (setq-local ghostel--term 'fake
+                                       ghostel-tmux--initialized t))
+                         (puthash pid buf ghostel-tmux--panes)
+                         buf)))
+                    ((symbol-function 'ghostel--set-size-with-cell-dims)
+                     (lambda (_term rows cols)
+                       (push (list ghostel-tmux--pane-name cols rows) sizes)))
+                    ((symbol-function 'ghostel--commit-frame) #'ignore)
+                    ((symbol-function 'get-buffer-window-list)
+                     (lambda (&rest _) nil)))
+            (dolist (pane panes)
+              (with-current-buffer (cdr pane)
+                (setq-local ghostel-tmux--pane-name (car pane))))
+            (ghostel-tmux--dispatch-notification
+             "%layout-change @0 baaa,120x40,0,0[120x20,0,0,1,120x19,0,21,2] aafe,120x40,0,0,1 -Z")
+            (should (equal (nreverse sizes) '((1 120 40) (2 120 19)))))
+        (mapc (lambda (pane) (kill-buffer (cdr pane))) panes)))))
+
+(ert-deftest ghostel-tmux-test-active-pane-removal-remembers-window ()
+  ;; tmux names the survivor after the pane is gone.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*dying*"))
+          (next (generate-new-buffer "*next*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) pane)
+            (puthash 5 pane ghostel-tmux--panes)
+            (puthash 6 next ghostel-tmux--panes)
+            (setq ghostel-tmux--active-pane-id 5)
+            (ghostel-tmux--remove-pane ctl 5)
+            (should (eq ghostel-tmux--auto-host-window (selected-window)))
+            (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                       (lambda (buf window) (set-window-buffer window buf))))
+              (ghostel-tmux--follow-active-pane 6))
+            (should (eq (window-buffer) next))
+            (should-not ghostel-tmux--auto-host-window))
+        (when (buffer-live-p pane) (kill-buffer pane))
+        (kill-buffer next)))))
+
+(ert-deftest ghostel-tmux-test-background-pane-removal-keeps-no-window ()
+  ;; A later switch must not land in the window of a background pane.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*bg*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (set-window-buffer (selected-window) pane)
+            (puthash 5 pane ghostel-tmux--panes)
+            (setq ghostel-tmux--active-pane-id 9)
+            (ghostel-tmux--remove-pane ctl 5)
+            (should-not ghostel-tmux--auto-host-window))
+        (when (buffer-live-p pane) (kill-buffer pane))))))
+
+(ert-deftest ghostel-tmux-test-follow-of-shown-pane-forgets-window ()
+  ;; The survivor is already on screen: nothing to redirect, then or later.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((next (generate-new-buffer "*shown*")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (let ((other (split-window)))
+              (set-window-buffer other next)
+              (puthash 6 next ghostel-tmux--panes)
+              (setq ghostel-tmux--auto-host-window (selected-window))
+              (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                         (lambda (&rest _) (error "Displayed"))))
+                (ghostel-tmux--follow-active-pane 6))
+              (should-not ghostel-tmux--auto-host-window)))
+        (kill-buffer next)))))
+
+(ert-deftest ghostel-tmux-test-switch-pane-empty-answer ()
+  ;; RET at the prompt answers with the empty string.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*pick*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) ""))
+                    ((symbol-function 'ghostel-tmux--pane-list)
+                     (lambda (_) (list pane)))
+                    ((symbol-function 'ghostel-tmux--select-pane-buffer)
+                     (lambda (_) (error "Selected"))))
+            (with-current-buffer pane
+              (setq-local ghostel-tmux--controller-buffer ctl)
+              (ghostel-tmux-switch-pane)))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-switch-pane-without-panes ()
+  ;; A sealed pane has no controller, so nothing to pick from.
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (error "Prompted"))))
+      (should-error (ghostel-tmux-switch-pane) :type 'user-error))))
 
 (ert-deftest ghostel-tmux-test-capture-feeds-rows-with-cr ()
   ;; capture-pane separates rows with a bare LF, which the VT engine

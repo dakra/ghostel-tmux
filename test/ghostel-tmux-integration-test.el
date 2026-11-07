@@ -37,7 +37,7 @@ while IFS= read -r line; do
     display-message*)
       printf '%%begin %d %d 1\\r\\n3.4\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     list-windows*)
-      printf '%%begin %d %d 1\\r\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\r\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     capture-pane*)
       printf '%%begin %d %d 1\\r\\nHISTORY_LINE_ONE\\r\\nVISIBLE_PROMPT$ \\r\\n%%end %d %d 1\\r\\n' $i $i $i $i
       printf '%%output %%0 BANNER_FROM_LIVE\\r\\n' ;;
@@ -186,6 +186,16 @@ SPEC is (BUFFER TERM)."
                                     (ghostel--copy-all-text ghostel--term)))))
       (when (buffer-live-p pane) (kill-buffer pane))
       (kill-buffer ctl))))
+
+(ert-deftest ghostel-tmux-integration-sealed-pane-leaves-mouse-to-emacs ()
+  "A sealed pane whose program tracked the mouse scrolls and selects again."
+  :tags '(native)
+  (ghostel-tmux-integration-test--with-host (pane term)
+    (dolist (mode '(1000 1002 1003))
+      (ghostel--write-vt term (format "\e[?%dh" mode))
+      (should (ghostel--mode-enabled term mode))
+      (ghostel-tmux--seal-pane-buffer pane)
+      (should-not (ghostel--mode-enabled term mode)))))
 
 (ert-deftest ghostel-tmux-integration-sealed-pane-reports-no-focus ()
   "A sealed pane whose program asked for focus reports sends none."
