@@ -601,65 +601,111 @@
     (setq-local ghostel-tmux--window-id nil)
     (should (null (ghostel-tmux--window-target)))))
 
-(ert-deftest ghostel-tmux-test-prefix-next-window-sends-select-window ()
-  ;; `C-t n' only sends `select-window' to tmux; the visible switch
-  ;; arrives reactively via `%window-pane-changed' →
-  ;; `--on-window-pane-changed' once tmux acks.
-  (let ((cmds nil)
-        (displayed nil))
-    (ghostel-tmux-test--with-controller ctl
-      (setq ghostel-tmux--window-order '(10 20)
-            ghostel-tmux--windows (make-hash-table)
-            ghostel-tmux--panes (make-hash-table))
-      (puthash 10 (list :name "w1" :panes (list 1)) ghostel-tmux--windows)
-      (puthash 20 (list :name "w2" :panes (list 2)) ghostel-tmux--windows)
-      (cl-letf (((symbol-function 'ghostel-tmux--cmd)
-                 (lambda (c) (push c cmds)))
-                ((symbol-function 'ghostel-tmux--display-pane-in-window)
-                 (lambda (buf _win) (push buf displayed))))
-        (with-temp-buffer
-          (setq-local ghostel-tmux--controller-buffer ctl
-                      ghostel-tmux--window-id 10
-                      ghostel-tmux--pane-id 1)
-          (ghostel-tmux--prefix-next-window))))
-    (should (equal cmds '("select-window -t @20")))
-    (should (null displayed))))
-
-(ert-deftest ghostel-tmux-test-prefix-prev-window-wraps-around ()
+(defun ghostel-tmux-test--cycle (ctl order command)
+  "Run COMMAND in a pane of CTL with windows ORDER; return what reached tmux."
   (let ((cmds nil))
-    (ghostel-tmux-test--with-controller ctl
-      (setq ghostel-tmux--window-order '(10 20)
-            ghostel-tmux--windows (make-hash-table)
-            ghostel-tmux--panes (make-hash-table))
-      (puthash 10 (list :name "w1" :panes (list 1)) ghostel-tmux--windows)
-      (puthash 20 (list :name "w2" :panes (list 2)) ghostel-tmux--windows)
-      (cl-letf (((symbol-function 'ghostel-tmux--cmd)
-                 (lambda (c) (push c cmds))))
-        ;; From window 10, `prev' wraps to window 20.
-        (with-temp-buffer
-          (setq-local ghostel-tmux--controller-buffer ctl
-                      ghostel-tmux--window-id 10
-                      ghostel-tmux--pane-id 1)
-          (ghostel-tmux--prefix-prev-window))))
-    (should (equal cmds '("select-window -t @20")))))
+    (with-current-buffer ctl
+      (setq ghostel-tmux--window-order order
+            ghostel-tmux--session-id 2))
+    (cl-letf (((symbol-function 'ghostel-tmux--cmd)
+               (lambda (c) (push c cmds))))
+      (with-temp-buffer
+        (setq-local ghostel-tmux--controller-buffer ctl)
+        (funcall command)))
+    cmds))
+
+(ert-deftest ghostel-tmux-test-prefix-next-window-leaves-the-order-to-tmux ()
+  "`C-t n' sends `next-window'; the visible switch comes with tmux's report."
+  (ghostel-tmux-test--with-controller ctl
+    (should (equal (ghostel-tmux-test--cycle
+                    ctl '(10 20) #'ghostel-tmux--prefix-next-window)
+                   '("next-window -t $2")))))
+
+(ert-deftest ghostel-tmux-test-prefix-prev-window-leaves-the-order-to-tmux ()
+  "`C-t p' sends `previous-window'."
+  (ghostel-tmux-test--with-controller ctl
+    (should (equal (ghostel-tmux-test--cycle
+                    ctl '(10 20) #'ghostel-tmux--prefix-prev-window)
+                   '("previous-window -t $2")))))
 
 (ert-deftest ghostel-tmux-test-prefix-next-window-noop-on-single-window ()
-  ;; With only one window, next/prev are silent no-ops — no command,
-  ;; no buffer switch, no error.
-  (let ((cmds nil))
-    (ghostel-tmux-test--with-controller ctl
-      (setq ghostel-tmux--window-order '(10)
-            ghostel-tmux--windows (make-hash-table)
-            ghostel-tmux--panes (make-hash-table))
-      (puthash 10 (list :name "w1" :panes (list 1)) ghostel-tmux--windows)
-      (cl-letf (((symbol-function 'ghostel-tmux--cmd)
-                 (lambda (c) (push c cmds))))
-        (with-temp-buffer
-          (setq-local ghostel-tmux--controller-buffer ctl
-                      ghostel-tmux--window-id 10
-                      ghostel-tmux--pane-id 1)
-          (ghostel-tmux--prefix-next-window))))
-    (should (null cmds))))
+  "With one window tmux would answer with an error: send nothing."
+  (ghostel-tmux-test--with-controller ctl
+    (should-not (ghostel-tmux-test--cycle
+                 ctl '(10) #'ghostel-tmux--prefix-next-window))))
+
+(ert-deftest ghostel-tmux-test-cycle-window-needs-a-controller ()
+  "A buffer without a controller says so."
+  (with-temp-buffer
+    (should-error (ghostel-tmux--prefix-next-window) :type 'user-error)))
+
+(ert-deftest ghostel-tmux-test-switch-pane-sees-a-rename-during-the-prompt ()
+  "A pane renamed while the prompt is open is found by its new name."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*old*"))
+          (selected nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer pane
+              (setq ghostel-tmux--window-id 0))
+            (puthash 5 pane ghostel-tmux--panes)
+            (setq ghostel-tmux--window-order '(0))
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt table &rest _)
+                         (with-current-buffer pane
+                           (rename-buffer "*new*"))
+                         (should (test-completion "*new*" table))
+                         (should-not (test-completion "*old*" table))
+                         "*new*"))
+                      ((symbol-function 'ghostel-tmux--select-pane-buffer)
+                       (lambda (buf) (setq selected buf))))
+              (with-temp-buffer
+                (setq-local ghostel-tmux--controller-buffer ctl)
+                (ghostel-tmux-switch-pane)))
+            (should (eq selected pane)))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-window-rows-set-the-window-order ()
+  "Rows list the session's windows in tmux's order."
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--window-order '(0 1 2 3))
+    (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
+      (ghostel-tmux--receive-window-rows
+       (concat "@0\t%0\t1\tw\tl\tv\n@3\t%3\t0\tw\tl\tv\n"
+               "@1\t%1\t0\tw\tl\tv\n@2\t%2\t0\tw\tl\tv\n")))
+    (should (equal ghostel-tmux--window-order '(0 3 1 2)))))
+
+(ert-deftest ghostel-tmux-test-window-rows-list-a-linked-window-once ()
+  "A window linked twice has two rows, but one tab per pane."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer " *ghostel-tmux-test-pane*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer pane
+              (setq-local ghostel-tmux--window-id 0))
+            (puthash 0 pane ghostel-tmux--panes)
+            (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
+                       #'ignore))
+              (ghostel-tmux--receive-window-rows
+               "@0\t%0\t1\tw\tl\tv\n@1\t%1\t0\tw\tl\tv\n@0\t%0\t0\tw\tl\tv\n"))
+            (should (equal ghostel-tmux--window-order '(0 1)))
+            (should (equal (ghostel-tmux--pane-list ctl) (list pane))))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-window-rows-order-in-a-c-locale ()
+  "A client without UTF-8 gets the tabs of a row as `_'."
+  (ghostel-tmux-test--with-controller ctl
+    (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change) #'ignore))
+      (ghostel-tmux--receive-window-rows
+       "@4_%0_1_my_name_a,80x24,0,0,0_a,80x24,0,0,0\n@2_%1_0_w_a,80x24,0,0,1_\n"))
+    (should (equal ghostel-tmux--window-order '(4 2)))))
+
+(ert-deftest ghostel-tmux-test-window-rows-without-a-row-keep-the-order ()
+  "A reply with no window row says nothing about the order."
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--window-order '(0 1))
+    (ghostel-tmux--receive-window-rows "not a row\n")
+    (should (equal ghostel-tmux--window-order '(0 1)))))
 
 (ert-deftest ghostel-tmux-test-prefix-new-window-uses-session-target ()
   (let ((cmds nil))
