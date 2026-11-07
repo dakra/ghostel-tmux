@@ -478,7 +478,7 @@ that session."
       (when ghostel--term
         (ghostel--write-vt ghostel--term
                            "\e[?1000l\e[?1002l\e[?1003l\e[?1004l"))
-      (tab-line-mode -1))))
+      (ghostel-tmux--drop-tab-line))))
 
 (defun ghostel-tmux--seal-panes (controller)
   "Seal every pane buffer belonging to CONTROLLER read-only.
@@ -1479,7 +1479,7 @@ receives the keystroke raw."
   :keymap ghostel-tmux-pane-mode-map
   (cond
    (ghostel-tmux-pane-mode
-    (setq tab-line-tabs-function #'ghostel-tmux--tab-line-tabs)
+    (setq-local tab-line-tabs-function #'ghostel-tmux--tab-line-tabs)
     (tab-line-mode 1)
     (add-hook 'kill-buffer-hook #'ghostel-tmux--pane-killed nil t)
     ;; tab-line click and any other plain `switch-to-buffer' path
@@ -1489,10 +1489,15 @@ receives the keystroke raw."
     (add-hook 'window-buffer-change-functions
               #'ghostel-tmux--on-window-buffer-change nil t))
    (t
-    (tab-line-mode -1)
+    (ghostel-tmux--drop-tab-line)
     (remove-hook 'kill-buffer-hook #'ghostel-tmux--pane-killed t)
     (remove-hook 'window-buffer-change-functions
                  #'ghostel-tmux--on-window-buffer-change t))))
+
+(defun ghostel-tmux--drop-tab-line ()
+  "Turn off the pane tabs of this buffer, which has no siblings to list."
+  (tab-line-mode -1)
+  (kill-local-variable 'tab-line-tabs-function))
 
 (defun ghostel-tmux--refresh-tab-line ()
   "Refresh `tab-line-mode' display in every pane buffer of this controller.
@@ -1656,6 +1661,7 @@ front-end."
       (setq ghostel-tmux--auto-original-name original-name)
       (rename-buffer (format " *ghostel-tmux-host:%s*" original-name) t))
     (add-hook 'ghostel-exit-functions #'ghostel-tmux--host-exited nil t)
+    (add-hook 'kill-buffer-hook #'ghostel-tmux--host-killed nil t)
     ;; `ghostel-tmux--controller-process' stays nil: the control stream
     ;; rides the host PTY, which `ghostel-tmux--controller-send' reaches
     ;; through `ghostel--write-pty'.
@@ -1715,6 +1721,7 @@ them are returned to the host buffer so the user lands back at the shell."
           ghostel-tmux--pending-follow-wid nil
           ghostel-tmux--active-pane-id nil)
     (remove-hook 'ghostel-exit-functions #'ghostel-tmux--host-exited t)
+    (remove-hook 'kill-buffer-hook #'ghostel-tmux--host-killed t)
     ;; Restore the host buffer's original (visible) name, if we renamed
     ;; it during entry to hide it from the user-visible buffer list.
     (when ghostel-tmux--auto-original-name
@@ -1734,6 +1741,11 @@ panes are sealed read-only and the host reverts to a plain buffer."
       (when ghostel-tmux--dcs-active
         (setq ghostel-tmux--dcs-active nil)
         (ghostel-tmux--exit-control-mode buf)))))
+
+(defun ghostel-tmux--host-killed ()
+  "Seal the panes of this auto-takeover host, whose buffer is being killed.
+`ghostel-exit-functions' does not run for a buffer that is gone."
+  (ghostel-tmux--seal-panes (current-buffer)))
 
 
 ;; Public commands
@@ -2056,6 +2068,7 @@ connected to a live tmux session."
                             ghostel-tmux-default-cols)
       (with-current-buffer buf
         (ghostel-tmux-pane-mode 1)
+        (ghostel-tmux--drop-tab-line)
         (setq ghostel--term-rows ghostel-tmux-default-rows
               ghostel--term-cols ghostel-tmux-default-cols
               ;; Swallow query replies (OSC/DA) — there is no live pane

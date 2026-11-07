@@ -513,6 +513,16 @@
         (ghostel-tmux--prefix-split-v)))
     (should (equal cmds '("split-window -h -t %4")))))
 
+(ert-deftest ghostel-tmux-test-pane-mode-keeps-tab-line-default ()
+  "Pane mode sets the tab function in its own buffer only."
+  (with-temp-buffer
+    (ghostel-tmux-pane-mode 1)
+    (should (eq tab-line-tabs-function #'ghostel-tmux--tab-line-tabs))
+    (should-not (eq (default-value 'tab-line-tabs-function)
+                    #'ghostel-tmux--tab-line-tabs))
+    (ghostel-tmux-pane-mode -1)
+    (should-not (local-variable-p 'tab-line-tabs-function))))
+
 (ert-deftest ghostel-tmux-test-prefix-zoom ()
   (let ((cmds nil))
     (cl-letf (((symbol-function 'ghostel-tmux--cmd)
@@ -2168,10 +2178,64 @@ SPEC is (FOLLOWED): that variable collects followed panes."
             (ghostel-tmux--seal-pane-buffer pane)
             (with-current-buffer pane
               (should-not tab-line-mode)
+              (should-not (local-variable-p 'tab-line-tabs-function))
               (should-error (ghostel-tmux--prefix-new-window)
                             :type 'user-error))
             (should (null sent)))
         (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-killed-host-seals-panes ()
+  ;; The shell's exit reaches no hook of a buffer that is gone.
+  (let ((host (generate-new-buffer "*tmux-host-killed*"))
+        (pane (generate-new-buffer "*ghostel-tmux:killed%0*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer pane
+            (ghostel-tmux-pane-mode 1)
+            (setq ghostel-tmux--controller-buffer host
+                  ghostel-pty-out-function #'ignore))
+          (with-current-buffer host
+            (ghostel-mode)
+            (ghostel-tmux--enter-control-mode host)
+            (puthash 0 pane ghostel-tmux--panes)
+            (setq-local kill-buffer-query-functions nil))
+          (kill-buffer host)
+          (with-current-buffer pane
+            (should-not ghostel-tmux--controller-buffer)
+            (should-not ghostel-pty-out-function)
+            (should buffer-read-only)
+            (should-not tab-line-mode)))
+      (when (buffer-live-p host) (kill-buffer host))
+      (kill-buffer pane))))
+
+(ert-deftest ghostel-tmux-test-exited-host-drops-kill-hook ()
+  (let ((host (generate-new-buffer "*tmux-host-exited*")))
+    (unwind-protect
+        (with-current-buffer host
+          (ghostel-mode)
+          (ghostel-tmux--enter-control-mode host)
+          (should (memq #'ghostel-tmux--host-killed kill-buffer-hook))
+          (ghostel-tmux--exit-control-mode host)
+          (should-not (memq #'ghostel-tmux--host-killed kill-buffer-hook)))
+      (kill-buffer host))))
+
+(ert-deftest ghostel-tmux-test-capture-has-no-tab-line ()
+  ;; A capture has no controller, so no sibling panes to list.
+  (let (buf)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-file)
+                   (lambda (&rest _) (insert "row\n") 0))
+                  ((symbol-function 'ghostel--init-buffer) #'ignore)
+                  ((symbol-function 'ghostel--write-vt) #'ignore)
+                  ((symbol-function 'ghostel--invalidate) #'ignore)
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (b) (setq buf b))))
+          (ghostel-tmux-capture "s:0.0")
+          (with-current-buffer buf
+            (should ghostel-tmux-pane-mode)
+            (should-not tab-line-mode)
+            (should-not (local-variable-p 'tab-line-tabs-function))))
+      (when buf (kill-buffer buf)))))
 
 (ert-deftest ghostel-tmux-test-no-command-after-detach ()
   ;; tmux reads nothing after `detach-client'; a command queued behind

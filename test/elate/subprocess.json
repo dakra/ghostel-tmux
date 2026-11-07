@@ -195,6 +195,7 @@
     {"assert": {"eval": "(elate-tmux-line-p \"hist-1\")"}},
     {"assert": {"eval": "(not (save-excursion (goto-char (point-min)) (re-search-forward \"^ +hist-\" nil t)))"}, "comment": "rows start at column 0"},
     {"assert": {"eval": "(equal (elate-tmux-q \"#{session_attached}\" \"d1\") \"0\")"}},
+    {"assert": {"eval": "(not tab-line-mode)"}, "comment": "a capture has no sibling panes"},
     {"eval": "(progn (kill-buffer (current-buffer)) (delete-other-windows) t)"},
 
     {"group": "quit paths", "comment": "a killed controller buffer, M-x ghostel-tmux-reset and a killed server each seal the panes"},
