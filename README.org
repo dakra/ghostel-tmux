@@ -17,7 +17,7 @@ tab line.
 
 | Command                                         | What it does                                                                            |
 |-------------------------------------------------+-----------------------------------------------------------------------------------------|
-| =M-x ghostel-tmux-new=                            | Create or attach to a session by name (=tmux -CC new-session -As <name>=).               |
+| =M-x ghostel-tmux-new=                            | Create or attach to a session by name.                                                   |
 | =M-x ghostel-tmux-attach=                         | Pick a running session via =completing-read= and attach.                                 |
 | =M-x ghostel-tmux-detach=                         | Detach the current session.  Pane buffers stay as read-only snapshots.                  |
 | =M-x ghostel-tmux-capture=                        | One-shot snapshot: dump a single pane's scrollback into a fresh buffer (no live link).  |

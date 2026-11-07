@@ -1939,16 +1939,19 @@ A non-zero exit (no server running) counts as no sessions."
   (unless (fboundp 'ghostel--new)
     (user-error "Ghostel-tmux: The native ghostel module is not available")))
 
+(defun ghostel-tmux--check-spawn ()
+  "Signal `user-error' when no controller can start in `default-directory'."
+  (ghostel-tmux--load-module)
+  ;; A remote shell that cannot `cd' there stays alive at its prompt.
+  (unless (file-directory-p default-directory)
+    (user-error "Ghostel-tmux: No directory %s" default-directory)))
+
 (defun ghostel-tmux--spawn-controller (session tmux-args)
   "Spawn a tmux -CC subprocess as a controller buffer.
 SESSION is the user-visible session label.  TMUX-ARGS is the list
 of arguments after \"tmux -CC\".  `-u' keeps non-ASCII text intact in
 any locale.  A remote `default-directory' runs tmux on that host.
 Returns the controller buffer."
-  (ghostel-tmux--load-module)
-  ;; A remote shell that cannot `cd' there stays alive at its prompt.
-  (unless (file-directory-p default-directory)
-    (user-error "Ghostel-tmux: No directory %s" default-directory))
   (let ((control-buf (generate-new-buffer
                       (format " *ghostel-tmux-control:%s*" session))))
     (condition-case err
@@ -2106,23 +2109,60 @@ still gets the window."
         (setq ghostel-tmux--auto-host-window target-window))
       (message "Ghostel-tmux: Still waiting for tmux")))))
 
+;; A bare name is parsed as a target: `proj.0' would be pane 0 of `proj'.
+(defun ghostel-tmux--exact-session-target (session)
+  "Return the tmux target of the session named exactly SESSION."
+  (format "=%s:" session))
+
+(defun ghostel-tmux--session-exists-p (session)
+  "Return non-nil when tmux has a session named exactly SESSION."
+  (eql 0 (ignore-errors
+           (with-temp-buffer
+             (ghostel-tmux--process-file
+              "has-session"
+              "-t" (ghostel-tmux--exact-session-target session))))))
+
+(defun ghostel-tmux--attach-args (session)
+  "Return the tmux arguments that attach the session named exactly SESSION."
+  (list "attach-session" "-t" (ghostel-tmux--exact-session-target session)))
+
+(defun ghostel-tmux--literal-format (string)
+  "Return the tmux format that expands to STRING.
+tmux leaves a run of `#' before `[' as it is, as a style."
+  (replace-regexp-in-string
+   "#+\\[?"
+   (lambda (match) (if (string-suffix-p "[" match) match (concat match match)))
+   string t t))
+
 ;;;###autoload
 (defun ghostel-tmux-attach (session)
-  "Attach to the tmux SESSION via control mode and materialize its panes."
+  "Attach to the tmux SESSION via control mode and materialize its panes.
+SESSION is an exact name.  tmux cannot address a name that starts with
+`$' or contains `:' this way."
   (interactive (list (ghostel-tmux--read-session)))
-  (let ((buf (ghostel-tmux--spawn-controller
-              session (list "attach-session" "-t" session))))
-    (ghostel-tmux--wait-for-pane buf 5.0)))
+  (ghostel-tmux--check-spawn)
+  (ghostel-tmux--wait-for-pane
+   (ghostel-tmux--spawn-controller session (ghostel-tmux--attach-args session))
+   5.0))
 
 ;;;###autoload
 (defun ghostel-tmux-new (session)
   "Create or attach to tmux SESSION via control mode.
-Uses `tmux -CC new-session -As' which creates the session if it does
-not exist, or attaches to an existing one with the same name."
+An existing session is attached like in `ghostel-tmux-attach', as
+`new-session -A' reaches it by a raw target; otherwise `tmux -CC
+new-session -As' creates it."
   (interactive (list (read-string "tmux session name: " "main")))
-  (let ((buf (ghostel-tmux--spawn-controller
-              session (list "new-session" "-As" session))))
-    (ghostel-tmux--wait-for-pane buf 5.0)))
+  (when (string-empty-p session)
+    (user-error "Ghostel-tmux: Empty session name"))
+  (ghostel-tmux--check-spawn)
+  (ghostel-tmux--wait-for-pane
+   (ghostel-tmux--spawn-controller
+    session
+    (if (ghostel-tmux--session-exists-p session)
+        (ghostel-tmux--attach-args session)
+      ;; tmux expands `-s' as a format.
+      (list "new-session" "-As" (ghostel-tmux--literal-format session))))
+   5.0))
 
 ;;;###autoload
 (defun ghostel-tmux-detach ()
