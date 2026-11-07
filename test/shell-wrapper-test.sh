@@ -8,28 +8,43 @@
 # Run: bash test/shell-wrapper-test.sh
 
 set -uo pipefail
+unset TMUX
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 FAKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$FAKE_DIR"' EXIT
 
-# Fake `tmux' that prints its argv to stdout and exits 0.
+# Fake `tmux' that prints its argv to stdout and exits 0, and lists
+# $FAKE_PANE_TTY as the only pane, failing without one like a dead server.
+# Fake `tty' names the shell's terminal.
 cat > "$FAKE_DIR/tmux" <<'EOF'
 #!/bin/sh
+case "$1" in
+    list-panes) [ -n "$FAKE_PANE_TTY" ] || exit 1; echo "$FAKE_PANE_TTY"; exit 0 ;;
+    load-buffer) [ -t 0 ] || echo "TMUX-CALLED-WITH:load-buffer $(cat)"; exit 0 ;;
+esac
 echo "TMUX-CALLED-WITH:$*"
 EOF
-chmod +x "$FAKE_DIR/tmux"
+cat > "$FAKE_DIR/tty" <<'EOF'
+#!/bin/sh
+[ -z "$FAKE_TTY_FAILS" ] || { echo "not a tty"; exit 1; }
+echo /dev/fake-tty
+EOF
+chmod +x "$FAKE_DIR/tmux" "$FAKE_DIR/tty"
+
+# Environment of a shell in a pane, and of one that only inherited $TMUX.
+IN_PANE="TMUX=/tmp/sock,1,0 FAKE_PANE_TTY=/dev/fake-tty"
+INHERITED="TMUX=/tmp/sock,1,0 FAKE_PANE_TTY=/dev/other-tty"
 
 PASS=0
 FAIL=0
 
 run_one() {
-    local label="$1" expected="$2"
-    shift 2
+    local label="$1" expected="$2" args="$3" prefix="${4:-}"
     local got
     got=$(PATH="$FAKE_DIR:$PATH" bash --noprofile --norc -c "
         source '$REPO/shell/ghostel-tmux.bash'
-        tmux $*
+        ${prefix}tmux $args
     " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')
     if [[ "$got" == "$expected" ]]; then
         printf '  PASS  %s\n' "$label"
@@ -64,7 +79,7 @@ run_one "tmux kill-server"          "kill-server"               "kill-server"
 run_one "tmux capture-pane -p"      "capture-pane -p"           "capture-pane -p"
 run_one "tmux source-file foo"      "source-file foo"           "source-file foo"
 
-# Flags-with-values: -L socket, -S path, -c cmd, -f file, -T features.
+# Flags-with-values: -L socket, -S path, -f file, -T features.
 run_one "tmux -L sock new"          "-u -CC -L sock new"           "-L sock new"
 run_one "tmux -S /tmp/x new -s y"   "-u -CC -S /tmp/x new -s y"    "-S /tmp/x new -s y"
 run_one "tmux -L sock ls"           "-L sock ls"                "-L sock ls"
@@ -111,12 +126,48 @@ DETACHED_CASES=(
     "new -- -d|-u -CC new -- -d"
     "-L -d new|-u -CC -L -d new"
     "attach -d|-u -CC attach -d"
+    "-c ls|-c ls"
+    "-L sock -c ls|-L sock -c ls"
+    "-L -c new|-u -CC -L -c new"
+    "new -c /tmp|-u -CC new -c /tmp"
 )
 
 for row in "${DETACHED_CASES[@]}"; do
     run_one "tmux ${row%%|*}" "${row##*|}" "${row%%|*}"
 done
 run_one "tmux new -d \\; attach"    "-u -CC new -d ; attach"    "new -d \\; attach"
+
+# In a pane tmux runs as typed; an inherited $TMUX says nothing.
+run_one "tmux new in a pane"        "new"                       "new" "$IN_PANE "
+run_one "tmux in a pane"            ""                          "" "$IN_PANE "
+run_one "tmux new, inherited TMUX"  "-u -CC new"                "new" "$INHERITED "
+run_one "tmux new, dead server"     "-u -CC new"                "new" \
+    "TMUX=/tmp/sock,1,0 "
+run_one "tmux new, empty TMUX"      "-u -CC new"                "new" "TMUX= "
+run_one "tmux new under set -u"     "-u -CC new"                "new" "set -u; "
+run_one "tmux new, dead server, set -e" "-u -CC new"            "new" \
+    "set -e; TMUX=/tmp/sock,1,0 "
+run_one "tmux new, longer pane tty" "-u -CC new"                "new" \
+    "TMUX=/tmp/sock,1,0 FAKE_PANE_TTY=/dev/fake-tty1 "
+run_one "tmux new, no tty, set -e"  "-u -CC new"                "new" \
+    "set -e; FAKE_TTY_FAILS=1 $INHERITED "
+
+check_shell_set_u() {
+    local got
+    got=$(PATH="$FAKE_DIR:$PATH" bash --noprofile --norc -c "
+        set -u
+        source '$REPO/shell/ghostel-tmux.bash'
+        tmux new
+    " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')
+    if [[ "$got" == "-u -CC new" ]]; then
+        printf '  PASS  %s\n' "sourced under set -u"
+        PASS=$((PASS + 1))
+    else
+        printf '  FAIL  %s\n        got: %q\n' "sourced under set -u" "$got"
+        FAIL=$((FAIL + 1))
+    fi
+}
+check_shell_set_u
 
 # zsh and fish wrappers: the detached cases, skipped without the shell.
 check_shell() {
@@ -131,7 +182,65 @@ check_shell() {
     fi
 }
 
+# An alias of the user's stays, and sourcing the file does not fail.
+check_alias() {
+    local label="$1" got="$2"
+    if [[ "$got" == "OUT:-2 new" ]]; then
+        printf '  PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf '  FAIL  %s\n        got: %q\n' "$label" "$got"
+        FAIL=$((FAIL + 1))
+    fi
+}
+ALIAS_FILTER='s/.*TMUX-CALLED-WITH:/OUT:/'
+
+check_alias "bash: an alias stays" \
+    "$(PATH="$FAKE_DIR:$PATH" bash --noprofile --norc -c "
+        shopt -s expand_aliases
+        alias tmux='tmux -2'
+        source '$REPO/shell/ghostel-tmux.bash'
+        tmux new
+    " 2>&1 | sed "$ALIAS_FILTER")"
+
 if command -v zsh >/dev/null 2>&1; then
+    check_alias "zsh: an alias stays" \
+        "$(PATH="$FAKE_DIR:$PATH" zsh -f -c "
+            alias tmux='tmux -2'
+            source '$REPO/shell/ghostel-tmux.zsh'
+            eval 'tmux new'
+        " 2>&1 | sed "$ALIAS_FILTER")"
+    for row in "$IN_PANE|new" "$INHERITED|-u -CC new" \
+               "TMUX=x FAKE_PANE_TTY=/dev/fake-tty1|-u -CC new"; do
+        check_shell "zsh: ${row%%|*}" "${row##*|}" \
+            "$(env PATH="$FAKE_DIR:$PATH" ${row%%|*} zsh -f -c "
+                source '$REPO/shell/ghostel-tmux.zsh'
+                tmux new
+            " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
+    done
+    check_shell "zsh: dead server under err_exit" "-u -CC new" \
+        "$(PATH="$FAKE_DIR:$PATH" TMUX=/tmp/sock,1,0 zsh -f -c "
+            source '$REPO/shell/ghostel-tmux.zsh'
+            setopt err_exit
+            tmux new
+        " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
+    check_shell "zsh: sourced under no_unset" "-u -CC new" \
+        "$(PATH="$FAKE_DIR:$PATH" zsh -f -c "
+            setopt no_unset
+            source '$REPO/shell/ghostel-tmux.zsh'
+            tmux new
+        " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
+    check_shell "zsh: tmux new under no_unset" "-u -CC new" \
+        "$(PATH="$FAKE_DIR:$PATH" zsh -f -c "
+            source '$REPO/shell/ghostel-tmux.zsh'
+            setopt no_unset
+            tmux new
+        " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
+    check_shell "zsh: sourced under emulate sh" "-u -CC new" \
+        "$(PATH="$FAKE_DIR:$PATH" zsh -f -c "
+            emulate sh -c \"source '$REPO/shell/ghostel-tmux.zsh'\"
+            tmux new
+        " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
     echo
     echo "zsh wrapper tests"
     for row in "${DETACHED_CASES[@]}" "new -d \; attach|-u -CC new -d ; attach"; do
@@ -144,6 +253,13 @@ if command -v zsh >/dev/null 2>&1; then
 fi
 
 if command -v fish >/dev/null 2>&1; then
+    for row in "$IN_PANE|new" "$INHERITED|-u -CC new"; do
+        check_shell "fish: ${row%%|*}" "${row##*|}" \
+            "$(env PATH="$FAKE_DIR:$PATH" ${row%%|*} fish --no-config -c "
+                source '$REPO/shell/ghostel-tmux.fish'
+                tmux new
+            " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
+    done
     echo
     echo "fish wrapper tests"
     for row in "${DETACHED_CASES[@]}" "new -d \; attach|-u -CC new -d ; attach"; do
@@ -170,7 +286,7 @@ if command -v nu >/dev/null 2>&1; then
         got=$(env -u GHOSTEL_TMUX_NO_CC INSIDE_EMACS=ghostel PATH="$FAKE_DIR:$PATH" \
             nu --no-config-file -c \
             "source '$REPO/shell/ghostel-tmux.nu'; $invocation" \
-            2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')
+            2>&1 </dev/null | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')
         if [[ "$got" == "$expected" ]]; then
             printf '  PASS  %s\n' "$label"
             PASS=$((PASS + 1))
@@ -198,6 +314,12 @@ if command -v nu >/dev/null 2>&1; then
         run_one_nu "nu: tmux ${row%%|*}" "${row##*|}" "tmux ${row%%|*}"
     done
     run_one_nu "nu: tmux new -d ';' attach" "-u -CC new -d ; attach" "tmux new -d ';' attach"
+    run_one_nu "nu: tmux new in a pane" "new" \
+        "with-env {TMUX: 'x', FAKE_PANE_TTY: '/dev/fake-tty'} { tmux new }"
+    run_one_nu "nu: piped input reaches tmux" "load-buffer x" \
+        "'x' | with-env {TMUX: 'x', FAKE_PANE_TTY: '/dev/other-tty', INSIDE_EMACS: ''} { tmux load-buffer - }"
+    run_one_nu "nu: tmux new, inherited TMUX" "-u -CC new" \
+        "with-env {TMUX: 'x', FAKE_PANE_TTY: '/dev/other-tty'} { tmux new }"
 
     got_nocc=$(GHOSTEL_TMUX_NO_CC=1 INSIDE_EMACS=ghostel PATH="$FAKE_DIR:$PATH" \
         nu --no-config-file -c \

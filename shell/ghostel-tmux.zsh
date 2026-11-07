@@ -3,9 +3,22 @@
 #   [[ "${INSIDE_EMACS%%,*}" = 'ghostel' ]] && source /path/to/ghostel-tmux/shell/ghostel-tmux.zsh
 # Bypass with `command tmux ...' or by exporting GHOSTEL_TMUX_NO_CC=1
 # before sourcing this file.
-if [[ -z "$GHOSTEL_TMUX_NO_CC" ]] && (( ! $+functions[tmux] )); then
-    tmux() {
+# `function' keeps an alias out of the definition, which is parsed even
+# when the alias makes the test below false.
+if [[ -z "${GHOSTEL_TMUX_NO_CC:-}" ]] && (( ! ${+functions[tmux]} && ! ${+aliases[tmux]} )); then
+    function tmux {
         local _arg
+        # In a pane a control client is no use.  `$TMUX' alone does not say
+        # so: an Emacs started from tmux passes it on to its shells.
+        if [[ -n "${TMUX:-}" ]]; then
+            local _tty _ttys
+            _tty=$(tty) || true
+            _ttys=$(command tmux list-panes -a -F '#{pane_tty}' 2>/dev/null) || true
+            if [[ $'\n'"$_ttys"$'\n' == *$'\n'"$_tty"$'\n'* ]]; then
+                command tmux "$@"
+                return $?
+            fi
+        fi
         for _arg in "$@"; do
             case "$_arg" in -C|-CC) command tmux "$@"; return $? ;; esac
         done
@@ -18,7 +31,9 @@ if [[ -z "$GHOSTEL_TMUX_NO_CC" ]] && (( ! $+functions[tmux] )); then
             _next=$((_next + 1))
             if (( _skip )); then _skip=0; continue; fi
             case "$_arg" in
-                -[cfLST]) _skip=1 ;;
+                # `-c' runs a shell command instead of a client.
+                -c) command tmux "$@"; return $? ;;
+                -[fLST]) _skip=1 ;;
                 -*) ;;
                 *) _subcmd="$_arg"; break ;;
             esac

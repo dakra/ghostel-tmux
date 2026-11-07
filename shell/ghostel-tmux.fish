@@ -4,6 +4,13 @@
 # Bypass with `command tmux ...' or by setting GHOSTEL_TMUX_NO_CC.
 if test -z "$GHOSTEL_TMUX_NO_CC"; and not functions -q tmux
     function tmux
+        # In a pane a control client is no use.  `$TMUX' alone does not say
+        # so: an Emacs started from tmux passes it on to its shells.
+        if test -n "$TMUX"
+            and contains -- (tty) (command tmux list-panes -a -F '#{pane_tty}' 2>/dev/null)
+            command tmux $argv
+            return $status
+        end
         for a in $argv
             if test "$a" = "-C"; or test "$a" = "-CC"
                 command tmux $argv
@@ -24,7 +31,11 @@ if test -z "$GHOSTEL_TMUX_NO_CC"; and not functions -q tmux
                 continue
             end
             switch $a
-                case '-c' '-f' '-L' '-S' '-T'
+                case '-c'
+                    # Runs a shell command instead of a client.
+                    command tmux $argv
+                    return $status
+                case '-f' '-L' '-S' '-T'
                     set _skip 1
                 case '-*'
                 case '*'

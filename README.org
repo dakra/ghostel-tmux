@@ -63,7 +63,9 @@ exits, as in any terminal without control-mode support.
 =shell/= has an optional =tmux= wrapper for bash, zsh, fish and nushell that
 adds =-u -CC= to the subcommands that attach (=tmux new=, =tmux attach=, =tmux a=,
 or bare =tmux=) and passes everything else through, also =tmux new -d=, which
-has no client to take over.  Source it in ghostel only:
+has no client to take over, =tmux -c=, and any =tmux= in a tmux pane.  In bash,
+zsh and fish a =tmux= alias or function defined before sourcing it stays in
+place of the wrapper.  Source it in ghostel only:
 
 #+begin_src sh
 # bash; for zsh use ghostel-tmux.zsh

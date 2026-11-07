@@ -1830,7 +1830,7 @@ frame's data and exit."
      (when (and ghostel-tmux-takeover-mode (not (ghostel-tmux--dcs-enter)))
        (message (concat "Ghostel-tmux: Ignoring tmux control-mode output in %s; "
                         "it stays hidden until tmux detaches "
-                        "(M-x ghostel-tmux-reset to force)")
+                        "(RET in that pane ends that client)")
                 (buffer-name))))
     ('data (ghostel-tmux--dcs-data data))
     ('exit (ghostel-tmux--dcs-exit))))
