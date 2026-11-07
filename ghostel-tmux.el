@@ -136,6 +136,9 @@ matching `%end' arrives; or with nil when an `%error' is received.")
 (defvar-local ghostel-tmux--command-in-flight nil
   "The (CMD-STRING . CONTINUATION) currently awaiting a block reply.")
 
+(defvar-local ghostel-tmux--reply-error nil
+  "The text of tmux's error reply to the last command, or nil.")
+
 (defvar-local ghostel-tmux--session-id nil
   "Numeric tmux session id this controller is attached to.")
 
@@ -473,6 +476,9 @@ showing a control-mode transcript)."
                    (equal kind "error"))
           (setq ghostel-tmux--exit-reason
                 (ghostel-tmux--decode-text (string-trim payload))))
+        (setq ghostel-tmux--reply-error
+              (and (equal kind "error")
+                   (ghostel-tmux--decode-text (string-trim payload))))
         (when cmd
           (let ((cont (cdr cmd)))
             (when cont
@@ -1314,11 +1320,56 @@ controller buffer has no further use and goes away."
 
 ;; Modes
 
-(defun ghostel-tmux--cmd (command)
+(defconst ghostel-tmux--typed-reply-end "ghostel-tmux-reply-end"
+  "What the marker command after a typed command prints.")
+
+(defun ghostel-tmux--report-failure (command text)
+  "Tell the user that tmux refused COMMAND, for the reason TEXT."
+  (message "Ghostel-tmux: Command failed: %s: %s" command text))
+
+(defun ghostel-tmux--show-reply (command outputs errors)
+  "Show tmux's answer to COMMAND: the block texts OUTPUTS and ERRORS.
+A plain `display-message' answers with a `%message' line."
+  (let ((text (mapconcat
+               (lambda (output)
+                 (string-remove-prefix "%message "
+                                       (ghostel-tmux--decode-text output)))
+               (cl-remove-if #'string-blank-p outputs)
+               "\n"))
+        (inhibit-read-only t))
+    (unless (string-empty-p text)
+      (display-message-or-buffer text "*ghostel-tmux-output*")))
+  (when errors
+    (ghostel-tmux--report-failure command (string-join errors "\n"))))
+
+(defun ghostel-tmux--queue-typed-command (command)
+  "Queue COMMAND, written by the user, and show what tmux answers.
+Free text gets any number of reply blocks, also none: a marker command
+goes after it, and COMMAND stays in flight until the marker's block."
+  (let (outputs errors)
+    (letrec ((on-block
+              (lambda (output)
+                (cond
+                 ((equal output ghostel-tmux--typed-reply-end)
+                  (ghostel-tmux--show-reply
+                   command (reverse outputs) (reverse errors)))
+                 (t
+                  (if output
+                      (push output outputs)
+                    (push ghostel-tmux--reply-error errors))
+                  (setq ghostel-tmux--command-in-flight
+                        (cons command on-block)))))))
+      (ghostel-tmux--queue-command
+       (format "%s\ndisplay-message -p %s"
+               command ghostel-tmux--typed-reply-end)
+       on-block))))
+
+(defun ghostel-tmux--cmd (command &optional typed)
   "Run tmux command-mode COMMAND through the active controller.
 Routed through `ghostel-tmux--queue-command' so a `%error' reply from
 tmux is captured and surfaced to the user instead of being eaten by
-whichever block happens to be in flight at the time."
+whichever block happens to be in flight at the time.  TYPED marks a
+COMMAND the user wrote, see `ghostel-tmux--queue-typed-command'."
   (let ((controller (or ghostel-tmux--controller-buffer
                         (and (derived-mode-p 'ghostel-tmux-control-mode)
                              (current-buffer))
@@ -1329,12 +1380,14 @@ whichever block happens to be in flight at the time."
     (with-current-buffer controller
       (unless (ghostel-tmux--controller-live-p)
         (user-error "Ghostel-tmux: Controller is not connected"))
-      (ghostel-tmux--queue-command
-       command
-       (lambda (output)
-         (when (null output)
-           ;; tmux replied with `%error' — surface to the user.
-           (message "Ghostel-tmux: command failed: %s" command)))))))
+      (if typed
+          (ghostel-tmux--queue-typed-command command)
+        (ghostel-tmux--queue-command
+         command
+         (lambda (output)
+           (unless output
+             (ghostel-tmux--report-failure
+              command ghostel-tmux--reply-error))))))))
 
 (defun ghostel-tmux--prefix-target ()
   "Return a `-t' target spec for the current pane buffer's tmux pane."
@@ -1460,10 +1513,14 @@ The visible switch happens reactively in `--on-session-window-changed'."
       (format "rename-session %s" (shell-quote-argument name))))
   "Rename the current tmux session.")
 
-(ghostel-tmux--define-prefix-cmd cmd ":"
-  (lambda (_target)
-    (read-string "tmux command: "))
-  "Prompt for an arbitrary tmux command and send it.")
+(defun ghostel-tmux--prefix-cmd ()
+  "Prompt for an arbitrary tmux command, send it and show its output."
+  (interactive)
+  ;; An empty line makes tmux leave control mode.
+  (when-let* ((lines (split-string (read-string "tmux command: ")
+                                   "\n" t "[ \t]+")))
+    (ghostel-tmux--cmd (string-join lines "\n") t)))
+(define-key ghostel-tmux-prefix-map (kbd ":") #'ghostel-tmux--prefix-cmd)
 
 ;; Number keys: select tmux window N in the current session.  We pin
 ;; the target to `$SID:N' so multi-session controllers don't switch

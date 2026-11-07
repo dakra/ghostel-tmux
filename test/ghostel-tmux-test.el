@@ -1916,6 +1916,166 @@
       (kill-buffer ctl)
       (delete-file script))))
 
+(defconst ghostel-tmux-test--reply-end
+  (format "%%begin 9 9 1\r\n%s\r\n%%end 9 9 1\r\n"
+          ghostel-tmux--typed-reply-end)
+  "The block that answers the marker after a typed command.")
+
+(defmacro ghostel-tmux-test--with-cmd (ctl typed reply &rest body)
+  "Run a command in CTL, TYPED or not, answer with REPLY and run BODY."
+  (declare (indent 3))
+  `(let ((sent nil))
+     (ghostel-tmux-test--with-wire ,ctl sent
+       (ghostel-tmux--cmd "x y" ,typed)
+       (ghostel-tmux-test--feed
+        ,ctl (concat ,reply (and ,typed ghostel-tmux-test--reply-end)))
+       ,@body)))
+
+(defmacro ghostel-tmux-test--capturing-messages (messages &rest body)
+  "Run BODY, collecting what `message' prints in MESSAGES, newest first."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'message)
+              (lambda (fmt &rest args)
+                (push (apply #'format fmt args) ,messages))))
+     ,@body))
+
+(defmacro ghostel-tmux-test--capturing-shown (shown &rest body)
+  "Run BODY, collecting what is shown to the user in SHOWN, newest first."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'display-message-or-buffer)
+              (lambda (text &rest _) (push text ,shown))))
+     ,@body))
+
+(ert-deftest ghostel-tmux-test-cmd-reports-tmux-error-text ()
+  "A failed command is reported with tmux's reason."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((messages nil))
+      (ghostel-tmux-test--capturing-messages messages
+        (ghostel-tmux-test--with-cmd ctl nil
+            "%begin 1 1 1\r\nunknown command: \303\266\r\n%error 1 1 1\r\n"
+          (should (equal (car messages)
+                         (concat "Ghostel-tmux: Command failed: x y: "
+                                 "unknown command: \u00f6"))))))))
+
+(ert-deftest ghostel-tmux-test-cmd-shows-output-of-typed-commands ()
+  "Only a typed command shows what it prints, as text."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((shown nil))
+      (ghostel-tmux-test--capturing-shown shown
+        (ghostel-tmux-test--with-cmd ctl t
+            "%begin 1 1 1\r\ngr\303\266\303\237e\r\n%end 1 1 1\r\n"
+          (should (equal shown '("gr\u00f6\u00dfe"))))
+        (setq shown nil)
+        (ghostel-tmux-test--with-cmd ctl nil
+            "%begin 1 1 1\r\nsecret\r\n%end 1 1 1\r\n"
+          (should-not shown))
+        (ghostel-tmux-test--with-cmd ctl t "%begin 1 1 1\r\n%end 1 1 1\r\n"
+          (should-not shown))
+        (ghostel-tmux-test--with-cmd ctl t
+            "%begin 1 1 1\r\n%message hi there\r\n%end 1 1 1\r\n"
+          (should (equal shown '("hi there"))))))))
+
+(ert-deftest ghostel-tmux-test-typed-command-sends-marker-in-one-write ()
+  "The marker goes out with the command, as no reply may come in between."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-cmd ctl t ""
+      (should (equal sent
+                     (list (format "x y\ndisplay-message -p %s\n"
+                                   ghostel-tmux--typed-reply-end)))))))
+
+(ert-deftest ghostel-tmux-test-typed-command-keeps-queue-paired ()
+  "All blocks of a typed line are its own, however many reads they take."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (shown nil) (behind nil))
+      (ghostel-tmux-test--capturing-shown shown
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux--cmd "a ; b" t)
+          (ghostel-tmux--queue-command "c" (lambda (out) (setq behind out)))
+          (ghostel-tmux-test--feed ctl "%begin 1 1 1\r\nA\r\n%end 1 1 1\r\n")
+          (ghostel-tmux--pump-command-queue)
+          (should-not (member "c\n" sent))
+          (ghostel-tmux-test--feed ctl "%begin 1 2 1\r\nB\r\n%end 1 2 1\r\n")
+          (ghostel-tmux--pump-command-queue)
+          (should-not (member "c\n" sent))
+          (should-not shown)
+          (ghostel-tmux-test--feed ctl ghostel-tmux-test--reply-end)
+          (ghostel-tmux--pump-command-queue)
+          (should (equal (car sent) "c\n"))
+          (should (equal shown '("A\nB")))
+          (ghostel-tmux-test--feed ctl "%begin 1 3 1\r\nC\r\n%end 1 3 1\r\n")
+          (should (equal behind "C")))))))
+
+(ert-deftest ghostel-tmux-test-typed-command-without-a-block-ends ()
+  "A line tmux answers with no block, such as a comment, holds nothing up."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux--cmd "# note" t)
+        (ghostel-tmux--queue-command "c")
+        (ghostel-tmux-test--feed ctl ghostel-tmux-test--reply-end)
+        (ghostel-tmux--pump-command-queue)
+        (should (equal (car sent) "c\n"))))))
+
+(ert-deftest ghostel-tmux-test-typed-command-shows-every-block ()
+  "Output, `%message' lines and errors of all blocks reach the user."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((messages nil) (shown nil))
+      (ghostel-tmux-test--capturing-messages messages
+        (ghostel-tmux-test--capturing-shown shown
+          (ghostel-tmux-test--with-cmd ctl t
+              (concat "%begin 1 1 1\r\n%end 1 1 1\r\n"
+                      "%begin 1 2 1\r\n%message one\r\n%end 1 2 1\r\n"
+                      "%begin 1 3 1\r\ntwo\r\n%message 3\r\n%end 1 3 1\r\n"
+                      "%begin 1 4 1\r\nbad one\r\n%error 1 4 1\r\n"
+                      "%begin 1 5 1\r\nbad two\r\n%error 1 5 1\r\n")
+            (should (equal shown '("one\ntwo\n%message 3")))
+            (should (equal (car messages)
+                           (concat "Ghostel-tmux: Command failed: x y: "
+                                   "bad one\nbad two")))))))))
+
+(ert-deftest ghostel-tmux-test-typed-output-buffer ()
+  "Long output replaces the last one, even read-only, and moves no focus."
+  (ghostel-tmux-test--with-controller ctl
+    (let* ((name "*ghostel-tmux-output*")
+           (block-of (lambda (line)
+                       (concat "%begin 1 1 1\r\n"
+                               (mapconcat (lambda (_) line)
+                                          (number-sequence 1 500) "\r\n")
+                               "\r\n%end 1 1 1\r\n")))
+           (window (selected-window))
+           (shown (window-buffer window)))
+      (unwind-protect
+          (progn
+            (ghostel-tmux-test--with-cmd ctl t (funcall block-of "first"))
+            (with-current-buffer name
+              (setq buffer-read-only t))
+            (ghostel-tmux-test--with-cmd ctl t (funcall block-of "second")
+              (should (eq (current-buffer) ctl)))
+            (with-current-buffer name
+              (should (string-prefix-p "second\n" (buffer-string)))
+              (should-not (string-search "first" (buffer-string))))
+            (should (eq (selected-window) window))
+            (should (eq (window-buffer window) shown)))
+        (delete-other-windows)
+        (kill-buffer name)))))
+
+(ert-deftest ghostel-tmux-test-prefix-cmd-sends-no-empty-line ()
+  "Neither blank input nor a yanked newline may reach tmux as an empty line."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (input "  \n"))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) input)))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux--prefix-cmd)
+          (should-not sent)
+          (setq input "x y\n")
+          (ghostel-tmux--prefix-cmd)
+          (should (string-prefix-p "x y\ndisplay-message" (car sent)))
+          (with-current-buffer ctl
+            (setq ghostel-tmux--command-in-flight nil))
+          (setq input "a\n\n  \nb")
+          (ghostel-tmux--prefix-cmd)
+          (should (string-prefix-p "a\nb\ndisplay-message" (car sent))))))))
+
 (ert-deftest ghostel-tmux-test-cmd-routes-through-queue ()
   ;; `--cmd' must use the command queue so tmux replies come back
   ;; correlated with the command, not eaten by another block.
@@ -2289,7 +2449,7 @@ tmux sends the layout that unzooms before the report of the selection."
   `(cl-letf (((symbol-function 'ghostel-tmux--queue-command)
               (lambda (cmd &optional _cont) (push cmd ,sent)))
              ((symbol-function 'ghostel-tmux--cmd)
-              (lambda (cmd) (push cmd ,sent))))
+              (lambda (cmd &optional _typed) (push cmd ,sent))))
      (with-current-buffer ,ctl ,@body)
      (setq ,sent (nreverse ,sent))))
 
