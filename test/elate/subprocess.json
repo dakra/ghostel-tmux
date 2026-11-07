@@ -25,6 +25,8 @@
     {"keys": "RET", "delivery": "events"},
     {"wait": "until", "pred": "(and (elate-tmux-shown) (string-search \":d1:\" (buffer-name)))"},
     {"wait": "until", "pred": "(elate-tmux-line-p \"hist-3000\")"},
+    {"eval": "(progn (elate-tmux-call \"rename-window\" \"-t\" (elate-tmux-id) \"größe\") t)", "comment": "a name on the wire is UTF-8 bytes"},
+    {"wait": "until", "pred": "(string-search \"größe\" (buffer-name))"},
     {"assert": {"eval": "(elate-tmux-line-p \"hist-1\")"}},
     {"wait": "until", "pred": "(elate-tmux-sync-p)"},
     {"assert": {"eval": "(equal (elate-tmux-tabs) (list (elate-tmux-id)))"}},

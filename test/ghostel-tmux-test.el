@@ -1129,7 +1129,7 @@
                   "demo" '("attach-session" "-t" "demo"))))
         (kill-buffer buf)))
     (should (equal seen-cmd
-                   '("tmux" "-CC" "attach-session" "-t" "demo")))))
+                   '("tmux" "-u" "-CC" "attach-session" "-t" "demo")))))
 
 (ert-deftest ghostel-tmux-test-spawn-controller-new-cmd ()
   (let ((seen-cmd nil))
@@ -1142,7 +1142,7 @@
                   "fresh" '("new-session" "-As" "fresh"))))
         (kill-buffer buf)))
     (should (equal seen-cmd
-                   '("tmux" "-CC" "new-session" "-As" "fresh")))))
+                   '("tmux" "-u" "-CC" "new-session" "-As" "fresh")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Detach: dedicated vs auto-takeover
@@ -1487,6 +1487,46 @@
           (should-not sent)
           (should-not (gethash 0 ghostel-tmux--windows))
           (should-not (buffer-live-p pane)))))))
+
+(ert-deftest ghostel-tmux-test-names-decode-from-wire-bytes ()
+  "Session and window names on the wire are UTF-8 bytes."
+  (let ((name "gr\303\266\303\237e")
+        (text "gr\u00f6\u00dfe")
+        seen)
+    (cl-letf (((symbol-function 'ghostel-tmux--on-session-changed)
+               (lambda (_sid n) (push n seen)))
+              ((symbol-function 'ghostel-tmux--on-session-renamed)
+               (lambda (n) (push n seen)))
+              ((symbol-function 'ghostel-tmux--on-window-renamed)
+               (lambda (_wid n) (push n seen))))
+      (ghostel-tmux--dispatch-notification (concat "%session-changed $1 " name))
+      (ghostel-tmux--dispatch-notification (concat "%session-renamed " name))
+      (ghostel-tmux--dispatch-notification (concat "%window-renamed @1 " name)))
+    (should (equal seen (list text text text)))
+    (should (equal (nth 3 (ghostel-tmux--parse-window-row
+                           (concat "@1\t%2\t1\t" name "\tlayout\tvisible")))
+                   text))))
+
+(ert-deftest ghostel-tmux-test-window-row-of-a-client-without-utf-8 ()
+  "tmux sends such a client `_' for every tab and non-ASCII character."
+  (should (equal (ghostel-tmux--parse-window-row
+                  "@1_%2_1_f_n_ster_bd5b,80x24,0,0,2_bd5b,80x24,0,0,2")
+                 '(1 2 t "f_n_ster" "bd5b,80x24,0,0,2" "bd5b,80x24,0,0,2")))
+  (should (equal (ghostel-tmux--parse-window-row
+                  "@1\t%2\t0\tfoo_bar\tbd5b,80x24,0,0,2\t")
+                 '(1 2 nil "foo_bar" "bd5b,80x24,0,0,2" ""))))
+
+(ert-deftest ghostel-tmux-test-process-file-is-utf-8-in-any-locale ()
+  "Session names and targets do not depend on the locale's coding system."
+  (let (seen)
+    (cl-letf (((symbol-function 'process-file)
+               (lambda (&rest args)
+                 (setq seen (list args coding-system-for-read
+                                  coding-system-for-write))
+                 0)))
+      (ghostel-tmux--process-file "list-sessions"))
+    (should (equal seen '(("tmux" nil (t nil) nil "-u" "list-sessions")
+                          utf-8-unix utf-8-unix)))))
 
 (ert-deftest ghostel-tmux-test-layout-change-tolerates-empty-raw-flags ()
   ;; A window with no printable flags makes `#{window_raw_flags}'

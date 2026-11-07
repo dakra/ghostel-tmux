@@ -59,6 +59,8 @@
     {"keys": "RET"},
     {"wait": "until", "pred": "(elate-tmux-line-p \"RED ok\")"},
     {"assert": {"eval": "(save-excursion (goto-char (point-min)) (re-search-forward \"^RED ok\") (get-text-property (match-beginning 0) (quote face)))"}},
+    {"eval": "(progn (elate-tmux-call \"rename-window\" \"-t\" (elate-tmux-id) \"größe\") t)", "comment": "a name on the wire is UTF-8 bytes"},
+    {"wait": "until", "pred": "(string-search \"größe\" (buffer-name))"},
 
     {"group": "wide output", "comment": "double-width characters"},
     {"type": "printf '日本語 漢字 🎉 ok\\n'"},

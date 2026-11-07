@@ -409,6 +409,10 @@ Splits on newlines, dispatches per-line via the state machine."
                     (substring ghostel-tmux--line-buffer idx)
                   "")))))))
 
+(defun ghostel-tmux--decode-name (name)
+  "Return NAME, a session or window name as sent by tmux, as text."
+  (decode-coding-string name 'utf-8))
+
 (defun ghostel-tmux--handle-line (line)
   "Dispatch a single LINE (no trailing CRLF) through the state machine."
   (pcase ghostel-tmux--parser-state
@@ -548,7 +552,7 @@ for a wedged parser."
    ((string-match "\\`%session-changed \\$\\([0-9]+\\) \\(.+\\)\\'" line)
     (ghostel-tmux--on-session-changed
      (string-to-number (match-string 1 line))
-     (match-string 2 line)))
+     (ghostel-tmux--decode-name (match-string 2 line))))
    ((string-match "\\`%session-window-changed \\$\\([0-9]+\\) @\\([0-9]+\\)\\'"
                   line)
     (ghostel-tmux--on-session-window-changed
@@ -558,7 +562,7 @@ for a wedged parser."
    ;; versions emit the name alone.
    ((string-match "\\`%session-renamed \\(?:\\$\\([0-9]+\\) \\)?\\(.+\\)\\'" line)
     (let ((sid (match-string 1 line))
-          (name (match-string 2 line)))
+          (name (ghostel-tmux--decode-name (match-string 2 line))))
       ;; Sent for every session on the server.
       (when (or (null sid)
                 (eql (string-to-number sid) ghostel-tmux--session-id))
@@ -579,7 +583,7 @@ for a wedged parser."
    ((string-match "\\`%window-renamed @\\([0-9]+\\) \\(.*\\)\\'" line)
     (ghostel-tmux--on-window-renamed
      (string-to-number (match-string 1 line))
-     (match-string 2 line)))
+     (ghostel-tmux--decode-name (match-string 2 line))))
    ((string-match
      "\\`%window-pane-changed @\\([0-9]+\\) %\\([0-9]+\\)\\'" line)
     (ghostel-tmux--on-window-pane-changed
@@ -1118,13 +1122,15 @@ shown keeps the size of its Emacs window."
 
 (defun ghostel-tmux--parse-window-row (line)
   "Parse `list-windows' LINE, or return nil for any other line.
-The result is (WID ACTIVE-PANE CURRENT NAME LAYOUT VISIBLE-LAYOUT)."
+The result is (WID ACTIVE-PANE CURRENT NAME LAYOUT VISIBLE-LAYOUT).
+A client without UTF-8, such as `tmux -CC' typed in a C locale, gets
+every tab and non-ASCII character of the row as `_'."
   (when (string-match
-         "\\`@\\([0-9]+\\)\t%\\([0-9]+\\)\t\\([01]\\)\t\\(.*\\)\t\\(.+\\)\t\\(.*\\)\\'" line)
+         "\\`@\\([0-9]+\\)[\t_]%\\([0-9]+\\)[\t_]\\([01]\\)[\t_]\\(.*\\)[\t_]\\(.+\\)[\t_]\\(.*\\)\\'" line)
     (list (string-to-number (match-string 1 line))
           (string-to-number (match-string 2 line))
           (equal (match-string 3 line) "1")
-          (match-string 4 line)
+          (ghostel-tmux--decode-name (match-string 4 line))
           (match-string 5 line)
           (match-string 6 line))))
 
@@ -1795,6 +1801,13 @@ panes are sealed read-only and the host reverts to a plain buffer."
 
 ;; Public commands
 
+(defun ghostel-tmux--process-file (&rest args)
+  "Run tmux with ARGS, insert its stdout at point and return its exit status.
+tmux's text is UTF-8 whatever the locale."
+  (let ((coding-system-for-read 'utf-8-unix)
+        (coding-system-for-write 'utf-8-unix))
+    (apply #'process-file ghostel-tmux-program nil (list t nil) nil "-u" args)))
+
 (defun ghostel-tmux--read-session ()
   "Prompt for a tmux session name and return it.
 A non-zero exit (no server running) counts as no sessions."
@@ -1802,10 +1815,8 @@ A non-zero exit (no server running) counts as no sessions."
          (output (with-output-to-string
                    (with-current-buffer standard-output
                      (setq status
-                           (process-file ghostel-tmux-program nil
-                                         (list t nil) nil
-                                         "list-sessions" "-F"
-                                         "#{session_name}")))))
+                           (ghostel-tmux--process-file
+                            "list-sessions" "-F" "#{session_name}")))))
          (sessions (and (eql status 0) (split-string output "\n" t)))
          (default (car sessions)))
     (cond
@@ -1817,7 +1828,8 @@ A non-zero exit (no server running) counts as no sessions."
 (defun ghostel-tmux--spawn-controller (session tmux-args)
   "Spawn a tmux -CC subprocess as a controller buffer.
 SESSION is the user-visible session label.  TMUX-ARGS is the list
-of arguments after \"tmux -CC\".  Returns the controller buffer."
+of arguments after \"tmux -CC\".  `-u' keeps non-ASCII text intact in
+any locale.  Returns the controller buffer."
   (let ((control-buf (generate-new-buffer
                       (format " *ghostel-tmux-control:%s*" session))))
     (with-current-buffer control-buf
@@ -1825,7 +1837,7 @@ of arguments after \"tmux -CC\".  Returns the controller buffer."
       (let* ((proc (make-process
                     :name (format "ghostel-tmux-%s" session)
                     :buffer control-buf
-                    :command (cons ghostel-tmux-program (cons "-CC" tmux-args))
+                    :command `(,ghostel-tmux-program "-u" "-CC" ,@tmux-args)
                     :coding 'binary
                     :connection-type 'pty
                     :noquery t
@@ -2097,12 +2109,10 @@ connected to a live tmux session."
           (with-output-to-string
             (with-current-buffer standard-output
               (setq status
-                    (process-file ghostel-tmux-program nil
-                                  (list t nil) nil
-                                  "capture-pane" "-peJ"
-                                  "-S" (number-to-string
-                                        (- ghostel-tmux-history-lines))
-                                  "-t" target))))))
+                    (ghostel-tmux--process-file
+                     "capture-pane" "-peJ"
+                     "-S" (number-to-string (- ghostel-tmux-history-lines))
+                     "-t" target))))))
     (unless (eql status 0)
       (user-error "Ghostel-tmux: capture-pane failed for %s" target))
     (when (string-empty-p output)

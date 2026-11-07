@@ -147,6 +147,25 @@ SPEC is (BUFFER TERM)."
             (should (equal name (buffer-name)))))
       (ghostel-tmux-takeover-mode -1))))
 
+(ert-deftest ghostel-tmux-integration-takeover-name-split-in-a-character ()
+  "A session name split inside a character decodes whole in the takeover."
+  :tags '(native)
+  (let ((ghostel-control-mode-function nil)
+        (ghostel-tmux-takeover-mode nil))
+    (ghostel-tmux-takeover-mode 1)
+    (unwind-protect
+        (ghostel-tmux-integration-test--with-host (host term)
+          (cl-letf (((symbol-function 'ghostel-tmux--initial-bootstrap)
+                     #'ignore))
+            (ghostel--write-vt term "\eP1000p%session-changed $1 gr\303")
+            (ghostel-tmux-integration-test--drain)
+            (ghostel--write-vt term "\266\303\237e\r\n")
+            (ghostel-tmux-integration-test--drain))
+          (should (equal ghostel-tmux--session-name "gr\u00f6\u00dfe"))
+          (ghostel--write-vt term "\e\\")
+          (ghostel-tmux-integration-test--drain))
+      (ghostel-tmux-takeover-mode -1))))
+
 (ert-deftest ghostel-tmux-integration-resize-keeps-repainted-prompt ()
   "A prompt the shell repaints after a pane resize stays on screen."
   :tags '(native)
