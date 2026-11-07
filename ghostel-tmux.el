@@ -692,9 +692,19 @@ A nil WINDOW-NAME (we haven't been told yet) is rendered as
                               window-name
                               pane-id))
                (buf (generate-new-buffer name)))
+          ;; ghostel refuses a local directory that is gone, such as the
+          ;; one an attach started in.
+          (unless (or (file-remote-p default-directory)
+                      (file-directory-p default-directory))
+            (with-current-buffer buf
+              (setq default-directory (expand-file-name "~/"))))
+          (condition-case err
+              (ghostel--init-buffer buf ghostel-tmux-default-rows
+                                    ghostel-tmux-default-cols)
+            ((error quit)
+             (kill-buffer buf)
+             (signal (car err) (cdr err))))
           (puthash pane-id buf ghostel-tmux--panes)
-          (ghostel--init-buffer buf ghostel-tmux-default-rows
-                                ghostel-tmux-default-cols)
           (with-current-buffer buf
             (ghostel-tmux-pane-mode 1)
             (setq ghostel-tmux--controller-buffer controller

@@ -505,6 +505,60 @@ fills its output queue between the two repeats the CR."
         (ghostel-tmux--control 'exit nil))
       (should (equal '(enter "%begin" exit) (nreverse calls))))))
 
+(ert-deftest ghostel-tmux-test-new-pane-outlives-a-deleted-directory ()
+  (ghostel-tmux-test--with-controller ctl
+    (let (dir buf)
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel--init-buffer)
+                     (lambda (b &rest _)
+                       (setq dir (buffer-local-value 'default-directory b)))))
+            (setq default-directory "/nonexistent/directory/")
+            (setq buf (ghostel-tmux--get-or-create-pane ctl 5 0))
+            (should (equal (expand-file-name "~/") dir))
+            (should (eq buf (gethash 5 ghostel-tmux--panes))))
+        (setq default-directory (expand-file-name "~/"))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest ghostel-tmux-test-new-pane-keeps-a-local-directory ()
+  (ghostel-tmux-test--with-controller ctl
+    (let ((home (expand-file-name "~/"))
+          (kept temporary-file-directory)
+          dir buf)
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel--init-buffer)
+                     (lambda (b &rest _)
+                       (setq dir (buffer-local-value 'default-directory b)))))
+            (setq default-directory kept)
+            (setq buf (ghostel-tmux--get-or-create-pane ctl 5 0))
+            (should (equal kept dir))
+            (should-not (equal home dir)))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest ghostel-tmux-test-new-pane-keeps-a-remote-directory ()
+  (ghostel-tmux-test--with-controller ctl
+    (let (dir buf)
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel--init-buffer)
+                     (lambda (b &rest _)
+                       (setq dir (buffer-local-value 'default-directory b))))
+                    ((symbol-function 'file-directory-p)
+                     (lambda (_) (error "Asked the remote host")))
+                    ((symbol-function 'file-remote-p) #'always))
+            (setq default-directory "/ssh:host:/tmp/")
+            (setq buf (ghostel-tmux--get-or-create-pane ctl 5 0))
+            (should (equal "/ssh:host:/tmp/" dir)))
+        (setq default-directory (expand-file-name "~/"))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
+
+(ert-deftest ghostel-tmux-test-failed-pane-leaves-nothing ()
+  (ghostel-tmux-test--with-controller ctl
+    (cl-letf (((symbol-function 'ghostel--init-buffer)
+               (lambda (&rest _) (error "No terminal"))))
+      (let ((buffers (buffer-list)))
+        (should-error (ghostel-tmux--get-or-create-pane ctl 5 0))
+        (should-not (gethash 5 ghostel-tmux--panes))
+        (should (equal buffers (buffer-list)))))))
+
 (ert-deftest ghostel-tmux-test-attach-targets-the-exact-session ()
   (let (args)
     (cl-letf (((symbol-function 'ghostel-tmux--load-module) #'ignore)
