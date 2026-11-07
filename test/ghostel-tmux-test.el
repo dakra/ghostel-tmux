@@ -393,7 +393,8 @@ fills its output queue between the two repeats the CR."
                  (lambda (_p s) (push s sent)))
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat fn &rest args)
-                   (push (cons fn args) timers))))
+                   (when (eq fn #'ghostel-tmux--pump-deferred)
+                     (push (cons fn args) timers)))))
         (ghostel-tmux-test--feed ctl "%begin 1 1 1\r\n%end 1 1 1\r\n")
         ;; Nothing sent synchronously; a deferred pump was scheduled.
         (should (null sent))
@@ -1961,8 +1962,7 @@ tmux resizes that screen when the pane leaves the alternate one."
 
 (ert-deftest ghostel-tmux-test-entry-points-load-the-module ()
   "Without the module an entry point stops before anything is started."
-  (let ((buffers (buffer-list))
-        (prompted 0))
+  (let ((prompted 0))
     (cl-letf (((symbol-function 'ghostel--load-module)
                (lambda (&optional prompt)
                  (should prompt)
@@ -1973,11 +1973,12 @@ tmux resizes that screen when the pane leaves the alternate one."
                (lambda (&rest _) (error "Started a process")))
               ((symbol-function 'process-file)
                (lambda (&rest _) (error "Started a process"))))
-      (should-error (ghostel-tmux-attach "x") :type 'user-error)
-      (should-error (ghostel-tmux-new "x") :type 'user-error)
-      (should-error (ghostel-tmux-capture "%1") :type 'user-error))
-    (should (= prompted 3))
-    (should (equal (buffer-list) buffers))))
+      (let ((buffers (buffer-list)))
+        (should-error (ghostel-tmux-attach "x") :type 'user-error)
+        (should-error (ghostel-tmux-new "x") :type 'user-error)
+        (should-error (ghostel-tmux-capture "%1") :type 'user-error)
+        (should (equal (buffer-list) buffers))))
+    (should (= prompted 3))))
 
 (ert-deftest ghostel-tmux-test-spawn-honours-a-remote-directory ()
   "tmux runs where the session list came from, on a binary stream."
@@ -2000,24 +2001,24 @@ tmux resizes that screen when the pane leaves the alternate one."
 
 (ert-deftest ghostel-tmux-test-spawn-needs-the-directory ()
   "A directory that is gone stops the spawn, also on a remote host."
-  (let ((buffers (buffer-list))
-        (default-directory "/nonexistent/directory/"))
-    (cl-letf (((symbol-function 'make-process)
-               (lambda (&rest _) (error "Started a process"))))
+  (cl-letf (((symbol-function 'make-process)
+             (lambda (&rest _) (error "Started a process"))))
+    (let ((buffers (buffer-list))
+          (default-directory "/nonexistent/directory/"))
       (should-error (ghostel-tmux--spawn-controller "x" nil)
-                    :type 'user-error))
-    (should (equal (buffer-list) buffers))))
+                    :type 'user-error)
+      (should (equal (buffer-list) buffers)))))
 
 (ert-deftest ghostel-tmux-test-spawn-quit-leaves-no-controller ()
   "Quitting a TRAMP login leaves no controller buffer."
-  (let ((buffers (buffer-list)))
-    (should (eq 'quit
-                (cl-letf (((symbol-function 'make-process)
-                           (lambda (&rest _) (signal 'quit nil))))
+  (cl-letf (((symbol-function 'make-process)
+             (lambda (&rest _) (signal 'quit nil))))
+    (let ((buffers (buffer-list)))
+      (should (eq 'quit
                   (condition-case nil
                       (ghostel-tmux--spawn-controller "x" nil)
-                    (quit 'quit)))))
-    (should (equal (buffer-list) buffers))))
+                    (quit 'quit))))
+      (should (equal (buffer-list) buffers)))))
 
 (ert-deftest ghostel-tmux-test-failed-attach-ends-the-wait ()
   "A tmux that dies ends the wait at once and leaves no controller."
