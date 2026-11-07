@@ -132,9 +132,10 @@ window's first tiled pane.  In a window with several tiled panes it zooms that
 pane, which takes the selection from the floating pane and hides it from other
 clients too.
 
-A current window that holds only floating panes has nothing to show: a takeover
-stays on the hidden shell, and =ghostel-tmux-attach= moves the session to a
-window with a tiled pane.
+A current window that holds only floating panes has nothing to show.  On attach,
+on takeover and when the pane shown goes away, Emacs moves the session to a
+window with a tiled pane.  A takeover that starts in a session with no tiled pane
+at all stays on the hidden shell.
 
 * Customization
 

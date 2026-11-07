@@ -192,8 +192,9 @@ the next prompt as if typed.")
   "When non-nil, the window to show tmux's active pane in once it is known.
 Set when a takeover starts, for the pane to replace the host's view, on
 a switch to another session, whose panes replace the ones shown, when
-the active pane goes away, and when `ghostel-tmux--wait-for-pane' gives
-up.")
+the active pane or the one standing in for it goes away, and when
+`ghostel-tmux--wait-for-pane' gives up or attaches to a current window of
+floating panes only.")
 
 (defvar-local ghostel-tmux--dcs-active nil
   "Non-nil when this buffer is currently inside a tmux DCS frame.
@@ -719,14 +720,24 @@ With WINDOW-ID, keep a pane that has moved on to another window."
                                      'ghostel-tmux--window-id buf))))
         (remhash pane-id ghostel-tmux--panes)
         (when (buffer-live-p buf)
-          (when (eql pane-id ghostel-tmux--active-pane-id)
+          (when (or (eql pane-id ghostel-tmux--active-pane-id)
+                    (ghostel-tmux--standing-in-p buf))
             (ghostel-tmux--keep-lost-pane-window buf))
           (with-current-buffer buf
             (setq ghostel-pty-out-function nil))
           (kill-buffer buf))))))
 
+(defun ghostel-tmux--standing-in-p (pane-buf)
+  "Return non-nil when PANE-BUF shows the current window for a floating pane.
+Such a pane is in the current window, whose active pane has no buffer."
+  (and ghostel-tmux--active-pane-id
+       ghostel-tmux--current-window-id
+       (eql ghostel-tmux--current-window-id
+            (buffer-local-value 'ghostel-tmux--window-id pane-buf))
+       (not (gethash ghostel-tmux--active-pane-id ghostel-tmux--panes))))
+
 (defun ghostel-tmux--keep-lost-pane-window (pane-buf)
-  "Keep the window of PANE-BUF, tmux's active pane, which is going away.
+  "Keep the window of PANE-BUF, which is going away.
 tmux reports the next active pane after the pane is gone, and sends no
 report when its active pane was another one; asking settles both."
   (when-let* ((window (get-buffer-window pane-buf 'visible)))
@@ -1124,7 +1135,40 @@ created; later changes arrive as notifications."
     ;; All of the session's windows, in tmux's order; a window linked
     ;; twice has two rows.
     (when rows
-      (setq ghostel-tmux--window-order (delete-dups (mapcar #'car rows))))))
+      (setq ghostel-tmux--window-order (delete-dups (mapcar #'car rows))))
+    (when (assq ghostel-tmux--current-window-id rows)
+      (ghostel-tmux--leave-floating-window))))
+
+(defun ghostel-tmux--floating-only-p ()
+  "Return non-nil when the session's current window has no tiled pane."
+  (and ghostel-tmux--current-window-id
+       (null (plist-get (gethash ghostel-tmux--current-window-id
+                                 ghostel-tmux--windows)
+                        :panes))))
+
+(defun ghostel-tmux--leave-floating-window ()
+  "Find the kept window a pane when the current window has no tiled pane.
+A window of floating panes only has nothing to show, so move the session
+to the first window with a tiled pane: `--on-session-window-changed' then
+fills the kept window with that window's own active pane, and the rows
+start over when that window is gone.  Without any tiled pane, the kept
+window waits as long as it holds the hidden host of a takeover; another
+buffer there is the user's."
+  (when (and (window-live-p ghostel-tmux--auto-host-window)
+             (ghostel-tmux--floating-only-p))
+    (let ((wid (cl-find-if
+                (lambda (wid)
+                  (plist-get (gethash wid ghostel-tmux--windows) :panes))
+                ghostel-tmux--window-order)))
+      (cond
+       (wid (ghostel-tmux--queue-command
+             (ghostel-tmux--select-window-command (current-buffer) wid)
+             (lambda (output)
+               (unless output
+                 (ghostel-tmux--request-window-rows)))))
+       ((not (eq (window-buffer ghostel-tmux--auto-host-window)
+                 (current-buffer)))
+        (setq ghostel-tmux--auto-host-window nil))))))
 
 (defconst ghostel-tmux--pane-state-fields
   '(alternate_on alternate_saved_x alternate_saved_y cursor_x cursor_y
@@ -2118,9 +2162,10 @@ takes its place, recorded as active so that showing it selects nothing."
 (defun ghostel-tmux--wait-for-pane (control-buf timeout)
   "Block up to TIMEOUT seconds for CONTROL-BUF to materialize a pane.
 Switches the selected window to tmux's active pane when one appears,
-or to the first pane while the active one is unknown.  A tmux that dies
-ends the wait; the sentinel reports it.  A pane later than TIMEOUT
-still gets the window."
+or to the first pane while the active one is unknown.  A current window
+of floating panes only keeps the selected window for a window it moves
+to.  A tmux that dies ends the wait; the sentinel reports it.  A pane
+later than TIMEOUT still gets the window."
   (let ((target-window (selected-window))
         (deadline (+ (float-time) timeout))
         (proc (buffer-local-value 'ghostel-tmux--controller-process
@@ -2133,10 +2178,16 @@ still gets the window."
       (accept-process-output proc 0.1))
     (cond
      (panes
-      (ghostel-tmux--display-pane-in-window
-       (or (with-current-buffer control-buf (ghostel-tmux--attach-pane))
-           (car panes))
-       target-window))
+      (with-current-buffer control-buf
+        (let ((pane (ghostel-tmux--attach-pane)))
+          (if (and (null pane)
+                   ghostel-tmux--active-pane-id
+                   (ghostel-tmux--floating-only-p))
+              (progn
+                (setq ghostel-tmux--auto-host-window target-window)
+                (ghostel-tmux--leave-floating-window))
+            (ghostel-tmux--display-pane-in-window (or pane (car panes))
+                                                  target-window)))))
      ((and (process-live-p proc) (buffer-live-p control-buf))
       (with-current-buffer control-buf
         (setq ghostel-tmux--auto-host-window target-window))
