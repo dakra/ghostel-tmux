@@ -1965,6 +1965,42 @@ SPEC is (FOLLOWED): that variable collects followed panes."
             (should (equal sent '("select-pane -t %5"))))
         (kill-buffer a)))))
 
+(ert-deftest ghostel-tmux-test-session-window-changed-waits-for-joined-pane ()
+  ;; `join-pane' reports the pane as active in its new window before
+  ;; that window's layout holds it.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (followed nil)
+          (a (generate-new-buffer "*join-a*"))
+          (b (generate-new-buffer "*join-b*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
+                     (lambda (pid) (push pid followed)))
+                    ((symbol-function 'ghostel-tmux--get-or-create-pane)
+                     (lambda (_ctl pid _wid _name)
+                       (with-current-buffer (gethash pid ghostel-tmux--panes)
+                         (setq-local ghostel-tmux--initialized t))
+                       (gethash pid ghostel-tmux--panes))))
+            (ghostel-tmux-test--with-sent ctl sent
+              (puthash 5 a ghostel-tmux--panes)
+              (puthash 6 b ghostel-tmux--panes)
+              (puthash 0 (list :name "w" :panes (list 5) :active-pane 5)
+                       ghostel-tmux--windows)
+              (setq ghostel-tmux--session-id 1
+                    ghostel-tmux--current-window-id 1
+                    ghostel-tmux--active-pane-id 6)
+              (ghostel-tmux--on-window-pane-changed 0 6)
+              (ghostel-tmux--on-session-window-changed 1 0)
+              (should (null followed))
+              (should (eql ghostel-tmux--pending-follow-wid 0))
+              (ghostel-tmux--on-layout-change
+               0 "bd5b,80x24,0,0[80x12,0,0,5,80x11,0,13,6]")
+              (should (eql (car followed) 6))
+              (should (eql ghostel-tmux--active-pane-id 6))
+              (should-not ghostel-tmux--pending-follow-wid))
+            (should-not sent))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
 (ert-deftest ghostel-tmux-test-session-window-changed-other-session ()
   ;; tmux reports this for every session on the server, also for a
   ;; session grouped with ours, whose windows are ours too.

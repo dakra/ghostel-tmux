@@ -930,16 +930,10 @@ and handled separately."
 
 (defun ghostel-tmux--on-session-window-changed (sid wid)
   "Handle `%session-window-changed $SID @WID': follow the new window.
-Fires when a session's current window changes (`C-t c', `C-t n',
-`C-t 0'..`9', external `select-window'), for every session on the
-server; other sessions are ignored.  Tmux does NOT emit
-`%window-pane-changed' for these events — the per-window active pane
-is preserved; only the *session*'s current window changes.
-
-If the target window already has materialized panes, follow the
-recorded active pane.  Without a recorded one, take the first pane and
-select it so tmux agrees.  A window without panes yet is marked for
-deferred follow — `--on-layout-change' picks it up."
+Sent for every session on the server; other sessions are ignored.
+Follow the window's recorded active pane, or select its first pane when
+none is recorded.  A window without panes yet, or whose recorded pane is
+still moving in (`join-pane'), waits for `--on-layout-change'."
   (when (eql sid ghostel-tmux--session-id)
     (setq ghostel-tmux--current-window-id wid
           ghostel-tmux--pending-follow-wid nil)
@@ -947,10 +941,12 @@ deferred follow — `--on-layout-change' picks it up."
            (panes (and entry (plist-get entry :panes)))
            (recorded (and entry (plist-get entry :active-pane)))
            (known (and recorded (memq recorded panes) recorded))
+           (moving (and recorded (not known)
+                        (gethash recorded ghostel-tmux--panes)))
            (target (or known (car panes)))
            (buf (and target (gethash target ghostel-tmux--panes))))
       (cond
-       ((buffer-live-p buf)
+       ((and (buffer-live-p buf) (not moving))
         (setq ghostel-tmux--active-pane-id target)
         (unless known
           (ghostel-tmux--queue-command (format "select-pane -t %%%d" target)))
