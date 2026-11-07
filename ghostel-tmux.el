@@ -58,7 +58,8 @@
   :prefix "ghostel-tmux-")
 
 (defcustom ghostel-tmux-program "tmux"
-  "The tmux executable to invoke for control mode."
+  "The tmux executable to invoke for control mode.
+With a remote `default-directory', it names a program on that host."
   :type 'string
   :group 'ghostel-tmux)
 
@@ -1844,11 +1845,23 @@ A non-zero exit (no server running) counts as no sessions."
      ((= (length sessions) 1) (car sessions))
      (t (completing-read "tmux session: " sessions nil t nil nil default)))))
 
+(defun ghostel-tmux--load-module ()
+  "Load ghostel's native module, or signal `user-error' without it.
+`ghostel--load-module' returns normally when the user skips the install."
+  (ghostel--load-module t)
+  (unless (fboundp 'ghostel--new)
+    (user-error "Ghostel-tmux: The native ghostel module is not available")))
+
 (defun ghostel-tmux--spawn-controller (session tmux-args)
   "Spawn a tmux -CC subprocess as a controller buffer.
 SESSION is the user-visible session label.  TMUX-ARGS is the list
 of arguments after \"tmux -CC\".  `-u' keeps non-ASCII text intact in
-any locale.  Returns the controller buffer."
+any locale.  A remote `default-directory' runs tmux on that host.
+Returns the controller buffer."
+  (ghostel-tmux--load-module)
+  ;; A remote shell that cannot `cd' there stays alive at its prompt.
+  (unless (file-directory-p default-directory)
+    (user-error "Ghostel-tmux: No directory %s" default-directory))
   (let ((control-buf (generate-new-buffer
                       (format " *ghostel-tmux-control:%s*" session))))
     (condition-case err
@@ -1860,13 +1873,16 @@ any locale.  Returns the controller buffer."
                         :command `(,ghostel-tmux-program "-u" "-CC" ,@tmux-args)
                         :coding 'binary
                         :connection-type 'pty
+                        :file-handler t
                         :noquery t
                         :filter #'ghostel-tmux--filter
                         :sentinel #'ghostel-tmux--sentinel)))
+            ;; TRAMP sets the coding of its connection after `:coding'.
+            (set-process-coding-system proc 'binary 'binary)
             (set-process-query-on-exit-flag proc nil)
             (setq ghostel-tmux--controller-process proc
                   ghostel-tmux--session-name session)))
-      (error
+      ((error quit)
        (kill-buffer control-buf)
        (signal (car err) (cdr err))))
     control-buf))
@@ -2139,6 +2155,7 @@ connected to a live tmux session."
                                ghostel-tmux--pane-id
                                (format "%%%d" ghostel-tmux--pane-id))
                           ""))))
+  (ghostel-tmux--load-module)
   (let* ((status nil)
          (output
           (with-output-to-string

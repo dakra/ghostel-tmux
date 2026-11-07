@@ -16,6 +16,11 @@
 
 (defvar ghostel-control-mode-function)
 
+;; The unit tests run without the native module.
+(advice-add 'ghostel--load-module :override #'ignore)
+(unless (fboundp 'ghostel--new)
+  (defalias 'ghostel--new #'ignore))
+
 ;; ---------------------------------------------------------------------------
 ;; Helpers
 ;; ---------------------------------------------------------------------------
@@ -1170,6 +1175,7 @@
                (lambda (&rest plist)
                  (setq seen-cmd (plist-get plist :command))
                  'fake-proc))
+              ((symbol-function 'set-process-coding-system) #'ignore)
               ((symbol-function 'set-process-query-on-exit-flag) #'ignore))
       (let ((buf (ghostel-tmux--spawn-controller
                   "demo" '("attach-session" "-t" "demo"))))
@@ -1183,6 +1189,7 @@
                (lambda (&rest plist)
                  (setq seen-cmd (plist-get plist :command))
                  'fake-proc))
+              ((symbol-function 'set-process-coding-system) #'ignore)
               ((symbol-function 'set-process-query-on-exit-flag) #'ignore))
       (let ((buf (ghostel-tmux--spawn-controller
                   "fresh" '("new-session" "-As" "fresh"))))
@@ -1731,6 +1738,66 @@
       (insert "#!/bin/sh\n" body "\n"))
     (set-file-modes path #o755)
     path))
+
+(ert-deftest ghostel-tmux-test-entry-points-load-the-module ()
+  "Without the module an entry point stops before anything is started."
+  (let ((buffers (buffer-list))
+        (prompted 0))
+    (cl-letf (((symbol-function 'ghostel--load-module)
+               (lambda (&optional prompt)
+                 (should prompt)
+                 (cl-incf prompted)))
+              ;; Skipping the install is no error in ghostel.
+              ((symbol-function 'ghostel--new) nil)
+              ((symbol-function 'make-process)
+               (lambda (&rest _) (error "Started a process")))
+              ((symbol-function 'process-file)
+               (lambda (&rest _) (error "Started a process"))))
+      (should-error (ghostel-tmux-attach "x") :type 'user-error)
+      (should-error (ghostel-tmux-new "x") :type 'user-error)
+      (should-error (ghostel-tmux-capture "%1") :type 'user-error))
+    (should (= prompted 3))
+    (should (equal (buffer-list) buffers))))
+
+(ert-deftest ghostel-tmux-test-spawn-honours-a-remote-directory ()
+  "tmux runs where the session list came from, on a binary stream."
+  (let ((real (symbol-function 'make-process))
+        args)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest a)
+                 (setq args a)
+                 ;; TRAMP's process has the coding of its connection.
+                 (funcall real :name "x" :command '("sleep" "10")
+                          :coding 'utf-8 :noquery t))))
+      (let ((buf (ghostel-tmux--spawn-controller "x" nil)))
+        (unwind-protect
+            (should (equal (process-coding-system
+                            (buffer-local-value
+                             'ghostel-tmux--controller-process buf))
+                           '(binary . binary)))
+          (kill-buffer buf))))
+    (should (plist-get args :file-handler))))
+
+(ert-deftest ghostel-tmux-test-spawn-needs-the-directory ()
+  "A directory that is gone stops the spawn, also on a remote host."
+  (let ((buffers (buffer-list))
+        (default-directory "/nonexistent/directory/"))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _) (error "Started a process"))))
+      (should-error (ghostel-tmux--spawn-controller "x" nil)
+                    :type 'user-error))
+    (should (equal (buffer-list) buffers))))
+
+(ert-deftest ghostel-tmux-test-spawn-quit-leaves-no-controller ()
+  "Quitting a TRAMP login leaves no controller buffer."
+  (let ((buffers (buffer-list)))
+    (should (eq 'quit
+                (cl-letf (((symbol-function 'make-process)
+                           (lambda (&rest _) (signal 'quit nil))))
+                  (condition-case nil
+                      (ghostel-tmux--spawn-controller "x" nil)
+                    (quit 'quit)))))
+    (should (equal (buffer-list) buffers))))
 
 (ert-deftest ghostel-tmux-test-failed-attach-ends-the-wait ()
   "A tmux that dies ends the wait at once and leaves no controller."
@@ -3091,6 +3158,22 @@ SPEC is (FOLLOWED): that variable collects followed panes."
               (setq-local ghostel-tmux--controller-buffer ctl)
               (ghostel-tmux-switch-pane)))
         (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-switch-pane-controller-dies-at-the-prompt ()
+  "A controller that goes away leaves the prompt with no choices."
+  (let ((ctl (generate-new-buffer " *ctl*")))
+    (cl-letf (((symbol-function 'ghostel-tmux--pane-list)
+               (lambda (_) (list (current-buffer))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (kill-buffer ctl)
+                 (should-not (all-completions "" table))
+                 ""))
+              ((symbol-function 'ghostel-tmux--select-pane-buffer)
+               (lambda (_) (error "Selected"))))
+      (with-temp-buffer
+        (setq-local ghostel-tmux--controller-buffer ctl)
+        (ghostel-tmux-switch-pane)))))
 
 (ert-deftest ghostel-tmux-test-switch-pane-without-panes ()
   ;; A sealed pane has no controller, so nothing to pick from.
