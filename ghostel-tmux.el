@@ -396,7 +396,7 @@ Splits on newlines, dispatches per-line via the state machine."
       (unwind-protect
           (while (and (buffer-live-p buffer)
                       (<= idx (length ghostel-tmux--line-buffer))
-                      (string-match "\r?\n" ghostel-tmux--line-buffer idx))
+                      (string-match "\r*\n" ghostel-tmux--line-buffer idx))
             (let ((line (substring ghostel-tmux--line-buffer
                                    idx (match-beginning 0))))
               (setq idx (match-end 0))
@@ -1182,32 +1182,155 @@ created; later changes arrive as notifications."
     (when rows
       (ghostel-tmux--set-window-order (mapcar #'car rows)))))
 
-(defun ghostel-tmux--bootstrap-pane (controller pane-id)
-  "Issue one capture-pane on CONTROLLER to backfill PANE-ID.
-The capture spans scrollback and the visible screen (a separate
-history capture with an empty scrollback repeats the first screen
-row).  `-C' octal-escapes control bytes: %begin/%end payloads are
-otherwise raw, and a raw ESC would end the control-mode DCS."
-  (with-current-buffer controller
-    (ghostel-tmux--queue-command
-     (format "capture-pane -peJC -t %%%d -S -%d"
-             pane-id ghostel-tmux-history-lines)
-     (apply-partially #'ghostel-tmux--receive-pane-history
-                      controller pane-id))))
+(defconst ghostel-tmux--pane-state-fields
+  '(alternate_on alternate_saved_x alternate_saved_y cursor_x cursor_y
+    cursor_flag wrap_flag insert_flag keypad_cursor_flag keypad_flag
+    bracket_paste_flag mouse_standard_flag mouse_button_flag mouse_all_flag
+    mouse_sgr_flag mouse_utf8_flag scroll_region_upper scroll_region_lower
+    pane_height)
+  "The tmux formats that describe a pane's terminal beyond its text.")
 
-(defun ghostel-tmux--receive-pane-history (controller pane-id output)
-  "Apply the capture-pane OUTPUT to PANE-ID's terminal under CONTROLLER.
-Rows are LF-separated and the VT engine does not synthesize CR, so they
-are fed as CRLF; trailing blank rows are dropped so the cursor lands
-after the last content line."
+(defconst ghostel-tmux--pane-mode-sequences
+  '((insert_flag . "\e[4h")
+    (keypad_cursor_flag . "\e[?1h")
+    (keypad_flag . "\e=")
+    (bracket_paste_flag . "\e[?2004h")
+    (mouse_standard_flag . "\e[?1000h")
+    (mouse_button_flag . "\e[?1002h")
+    (mouse_all_flag . "\e[?1003h")
+    (mouse_sgr_flag . "\e[?1006h")
+    (mouse_utf8_flag . "\e[?1005h"))
+  "The sequence turning on each mode of `ghostel-tmux--pane-state-fields'.")
+
+(defun ghostel-tmux--bootstrap-pane (controller pane-id)
+  "Ask tmux, on CONTROLLER, for what it takes to backfill PANE-ID.
+The pane's terminal state, its primary screen when in the alternate one,
+its scrollback with its screen (a separate history capture with an empty
+scrollback repeats the first screen row), and its screen alone.  One
+write keeps pane output from getting between them.  `-C' octal-escapes
+control bytes: %begin/%end payloads are otherwise raw, and a raw ESC
+would end the control-mode DCS."
+  (with-current-buffer controller
+    (let ((command
+           (format (concat "display-message -p -t %%%d '%s'\n"
+                           "capture-pane -aq -peC -t %%%d\n"
+                           "capture-pane -peJC -t %%%d -S -%d\n"
+                           "capture-pane -peJC -t %%%d")
+                   pane-id
+                   (mapconcat (lambda (field) (format "#{%s}" field))
+                              ghostel-tmux--pane-state-fields ",")
+                   pane-id pane-id ghostel-tmux-history-lines pane-id))
+          (replies nil))
+      (letrec ((on-block
+                (lambda (output)
+                  (push output replies)
+                  (if (< (length replies) 4)
+                      (setq ghostel-tmux--command-in-flight
+                            (cons command on-block))
+                    (apply #'ghostel-tmux--receive-pane-backfill
+                           controller pane-id (reverse replies))))))
+        (ghostel-tmux--queue-command command on-block)))))
+
+(defun ghostel-tmux--parse-pane-state (output)
+  "Parse OUTPUT of `ghostel-tmux--pane-state-fields' into an alist, or nil."
+  (let ((values (and output (split-string (string-trim output) ","))))
+    (when (= (length values) (length ghostel-tmux--pane-state-fields))
+      (cl-mapcar #'cons ghostel-tmux--pane-state-fields values))))
+
+(defun ghostel-tmux--pane-state-number (state field)
+  "Return the number of FIELD in STATE."
+  (string-to-number (alist-get field state)))
+
+(defun ghostel-tmux--cursor-sequence (x up)
+  "Return the sequence moving the cursor UP rows and to column X."
+  (format "%s\e[%dG" (if (> up 0) (format "\e[%dA" up) "") (1+ x)))
+
+(defun ghostel-tmux--pane-state-sequences (state term-rows)
+  "Return the sequences giving a terminal of TERM-ROWS rows the modes of STATE.
+tmux resets a scroll region when the height changes, which it is about
+to do for a terminal of another height.  Setting a region moves the
+cursor, so it is saved around that."
+  (let ((upper (ghostel-tmux--pane-state-number state 'scroll_region_upper))
+        (lower (ghostel-tmux--pane-state-number state 'scroll_region_lower))
+        (height (ghostel-tmux--pane-state-number state 'pane_height)))
+    (concat
+     (mapconcat (lambda (mode)
+                  (if (equal (alist-get (car mode) state) "1") (cdr mode) ""))
+                ghostel-tmux--pane-mode-sequences "")
+     (if (equal (alist-get 'wrap_flag state) "0") "\e[?7l" "")
+     (if (equal (alist-get 'cursor_flag state) "0") "\e[?25l" "")
+     (if (and (= height term-rows)
+              (or (> upper 0) (< lower (1- height))))
+         (format "\e7\e[%d;%dr\e8" (1+ upper) (1+ lower))
+       ""))))
+
+(defun ghostel-tmux--backfill-rows (rows)
+  "Return the captured ROWS, separated by LF, ready for the VT engine.
+The engine does not synthesize CR, so they are fed as CRLF."
+  (ghostel-tmux--decode-output (string-replace "\n" "\r\n" rows)))
+
+(defun ghostel-tmux--backfill-screen (lines height x y term-rows)
+  "Return the bytes showing LINES in a terminal of TERM-ROWS rows.
+LINES end with a screen of HEIGHT rows whose cursor is at column X, row
+Y.  The cursor moves from the last row fed: a terminal of another height
+shows the rows at another offset from its top.  A lower terminal loses
+blank rows below the cursor first, as tmux does when it shrinks the
+pane.  A capture ends without resetting its colors."
+  (let* ((below (- height y 1))
+         (blank (or (cl-position-if-not #'string-blank-p (reverse lines))
+                    (length lines)))
+         (lost (max 0 (min below blank (- height term-rows)))))
+    (concat (ghostel-tmux--backfill-rows
+             (string-join (butlast lines lost) "\n"))
+            "\e[m"
+            (ghostel-tmux--cursor-sequence x (- below lost)))))
+
+(defun ghostel-tmux--backfill-data (state primary rows screen term-rows)
+  "Return the bytes recreating a pane in a terminal of TERM-ROWS rows.
+STATE is the result of `ghostel-tmux--parse-pane-state', PRIMARY the
+primary screen of a pane in the alternate one, at the height it had
+there, ROWS the pane's scrollback and screen, and SCREEN the screen
+alone.  Without STATE, trailing blank rows are dropped so that the
+cursor lands after the last content line."
+  (if (null state)
+      (ghostel-tmux--backfill-rows (string-trim-right rows "\n+"))
+    (let ((height (ghostel-tmux--pane-state-number state 'pane_height))
+          (x (ghostel-tmux--pane-state-number state 'cursor_x))
+          (y (ghostel-tmux--pane-state-number state 'cursor_y)))
+      (concat
+       (if (equal (alist-get 'alternate_on state) "1")
+           (let* ((lines (split-string (or screen "") "\n"))
+                  (history (butlast (split-string rows "\n") (length lines)))
+                  (saved (split-string (or primary "") "\n")))
+             (concat
+              (when history
+                (concat (ghostel-tmux--backfill-rows
+                         (string-join history "\n"))
+                        "\e[m\r\n"))
+              (ghostel-tmux--backfill-screen
+               saved (length saved)
+               (ghostel-tmux--pane-state-number state 'alternate_saved_x)
+               (ghostel-tmux--pane-state-number state 'alternate_saved_y)
+               term-rows)
+              "\e[?1049h\e[2J\e[H"
+              (ghostel-tmux--backfill-screen lines height x y term-rows)))
+         (ghostel-tmux--backfill-screen (split-string rows "\n")
+                                        height x y term-rows))
+       (ghostel-tmux--pane-state-sequences state term-rows)))))
+
+(defun ghostel-tmux--receive-pane-backfill (controller pane-id state primary
+                                                       rows screen)
+  "Recreate PANE-ID's terminal under CONTROLLER from tmux's replies.
+STATE, PRIMARY, ROWS and SCREEN are the replies `--bootstrap-pane' asked
+for, each nil for a failed command."
   (let ((buf (with-current-buffer controller
                (gethash pane-id ghostel-tmux--panes))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (when output
-          (let ((data (ghostel-tmux--decode-output
-                       (string-replace "\n" "\r\n"
-                                       (string-trim-right output "\n+"))))
+        (when rows
+          (let ((data (ghostel-tmux--backfill-data
+                       (ghostel-tmux--parse-pane-state state) primary rows
+                       screen ghostel--term-rows))
                 (ghostel-tmux--in-write-vt t))
             ;; save-current-buffer: native callbacks may select another
             ;; buffer mid-parse; the state updates below must land here.

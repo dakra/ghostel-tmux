@@ -34,6 +34,8 @@ i=1
 while IFS= read -r line; do
   i=$((i+1))
   case \"$line\" in
+    *alternate_on*)
+      printf '%%begin %d %d 1\\r\\n0,0,0,16,1,1,1,0,0,0,1,0,0,0,0,0,0,1,2\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     display-message*)
       printf '%%begin %d %d 1\\r\\n3.4\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
     list-windows*)
@@ -109,13 +111,16 @@ SPEC is (BUFFER TERM)."
                     (throw 'done t)))
                 (accept-process-output nil 0.1))))
           (should created-buf)
-          ;; The terminal holds at least one of the pieces of text we
-          ;; fed in.
+          ;; The capture is on screen, output continues at the cursor of
+          ;; the pane's state, and that state's modes are on.  Output
+          ;; before the last reply is part of the capture.
+          (accept-process-output nil 0.2)
           (with-current-buffer created-buf
-            (let ((text (ghostel--copy-all-text ghostel--term)))
-              (should (or (string-match-p "HISTORY_LINE_ONE" text)
-                          (string-match-p "VISIBLE_PROMPT" text)
-                          (string-match-p "BANNER_FROM_LIVE" text))))))
+            (should (string-match-p
+                     "HISTORY_LINE_ONE\nVISIBLE_PROMPT\\$ BANNER_FROM_LIVE\\'"
+                     (string-trim-right
+                      (ghostel--copy-all-text ghostel--term))))
+            (should (ghostel--mode-enabled ghostel--term 2004))))
       (when (file-exists-p fake) (delete-file fake))
       (when (and created-buf (buffer-live-p created-buf))
         (kill-buffer created-buf))

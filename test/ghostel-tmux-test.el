@@ -66,6 +66,26 @@
         (should (equal reply "ok"))
         (should (equal ghostel-tmux--line-buffer ""))))))
 
+(ert-deftest ghostel-tmux-test-feed-takes-doubled-cr ()
+  "A terminator or `%output' with a doubled CR is still what it is.
+tmux's tty turns LF into CRLF, and on macOS a non-blocking write that
+fills its output queue between the two repeats the CR."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((seen nil)
+          (reply nil))
+      (cl-letf (((symbol-function 'ghostel-tmux--on-output)
+                 (lambda (_pid data) (push data seen)))
+                ((symbol-function 'ghostel-tmux--controller-live-p)
+                 (lambda () t))
+                ((symbol-function 'ghostel-tmux--controller-send) #'ignore))
+        (ghostel-tmux--queue-command "x" (lambda (out) (setq reply out)))
+        (ghostel-tmux-test--feed
+         ctl (concat "\eP1000p%output %0 a\r\r\n"
+                     "%begin 1 2 1\r\r\nok\r\r\n%end 1 2 1\r\r\n"))
+        (should (equal seen '("a")))
+        (should (equal reply "ok"))
+        (should-not ghostel-tmux--command-in-flight)))))
+
 (ert-deftest ghostel-tmux-test-feed-keeps-position-on-nonlocal-exit ()
   "A non-error exit from a handler still consumes the lines handled so far."
   (ghostel-tmux-test--with-controller ctl
@@ -1323,11 +1343,209 @@
               (setq-local ghostel--term 'fake))
             (with-current-buffer ctl
               (puthash 0 pane ghostel-tmux--panes))
-            (ghostel-tmux--receive-pane-history
-             ctl 0 "literal \\\\033 \\033[31mred\n$ \n\n\n")
+            (ghostel-tmux--receive-pane-backfill
+             ctl 0 nil nil "literal \\\\033 \\033[31mred\n$ \n\n\n" nil)
             (should (equal written '("literal \\033 \e[31mred\r\n$ ")))
             (should (buffer-local-value 'ghostel-tmux--initialized pane)))
         (when (buffer-live-p pane) (kill-buffer pane))))))
+
+(defun ghostel-tmux-test--pane-state (&rest overrides)
+  "Return the reply of a plain pane's state, with OVERRIDES of FIELD VALUE."
+  (mapconcat
+   (lambda (field)
+     (or (plist-get overrides field)
+         (pcase field
+           ('cursor_flag "1")
+           ('wrap_flag "1")
+           ('pane_height "3")
+           ('scroll_region_lower "2")
+           (_ "0"))))
+   ghostel-tmux--pane-state-fields ","))
+
+(ert-deftest ghostel-tmux-test-parse-pane-state ()
+  "A reply parses by field; a reply of any other shape does not."
+  (let ((state (ghostel-tmux--parse-pane-state
+                (concat (ghostel-tmux-test--pane-state 'cursor_y "2") "\n"))))
+    (should (equal (alist-get 'cursor_y state) "2")))
+  (should-not (ghostel-tmux--parse-pane-state "3.4"))
+  (should-not (ghostel-tmux--parse-pane-state nil))
+  ;; A format this tmux lacks expands to nothing.
+  (let ((state (ghostel-tmux--parse-pane-state
+                (ghostel-tmux-test--pane-state 'bracket_paste_flag ""
+                                               'wrap_flag ""))))
+    (should (equal (ghostel-tmux--backfill-data state nil "x" nil 3)
+                   "x\e[m\e[2A\e[1G"))))
+
+(ert-deftest ghostel-tmux-test-backfill-keeps-blank-rows-and-places-cursor ()
+  "With a state the screen stays whole: the cursor is relative to it."
+  (should (equal (ghostel-tmux--backfill-data
+                  (ghostel-tmux--parse-pane-state
+                   (ghostel-tmux-test--pane-state
+                    'cursor_x "4" 'cursor_y "0"))
+                  nil "history\n$ \n\n" "$ \n\n" 3)
+                 "history\r\n$ \r\n\r\n\e[m\e[2A\e[5G")))
+
+(ert-deftest ghostel-tmux-test-backfill-low-terminal-loses-rows-below-cursor ()
+  "A terminal lower than the pane drops rows below the cursor, as tmux does."
+  (let ((state (ghostel-tmux--parse-pane-state
+                (ghostel-tmux-test--pane-state 'pane_height "5"
+                                               'scroll_region_lower "4"
+                                               'cursor_x "2" 'cursor_y "1"))))
+    (should (equal (ghostel-tmux--backfill-data state nil "a\n$ \n\n\n" nil 3)
+                   "a\r\n$ \r\n\e[m\e[1A\e[3G"))
+    ;; Never more than are below the cursor.
+    (should (equal (ghostel-tmux--backfill-data state nil "a\n$ \n\n\n" nil 1)
+                   "a\r\n$ \e[m\e[3G"))
+    ;; A taller terminal keeps them all.
+    (should (equal (ghostel-tmux--backfill-data state nil "a\n$ \n\n\n" nil 9)
+                   "a\r\n$ \r\n\r\n\r\n\e[m\e[3A\e[3G"))
+    ;; The blank row of the cursor and those above it stay.
+    (should (equal (ghostel-tmux--backfill-data state nil "\n\n\n\n" nil 1)
+                   "\r\n\e[m\e[3G"))))
+
+(ert-deftest ghostel-tmux-test-backfill-low-terminal-keeps-text ()
+  "A joined line below the cursor is more than one row: it stays."
+  (should (equal (ghostel-tmux--backfill-data
+                  (ghostel-tmux--parse-pane-state
+                   (ghostel-tmux-test--pane-state 'pane_height "4"
+                                                  'scroll_region_lower "3"
+                                                  'cursor_y "1"))
+                  nil "a\n$ joined line" nil 3)
+                 "a\r\n$ joined line\e[m\e[2A\e[1G")))
+
+(ert-deftest ghostel-tmux-test-backfill-restores-modes ()
+  "Each mode reported on is turned on; what is on by default turned off."
+  (let ((data (ghostel-tmux--backfill-data
+               (ghostel-tmux--parse-pane-state
+                (ghostel-tmux-test--pane-state
+                 'insert_flag "1" 'keypad_cursor_flag "1" 'keypad_flag "1"
+                 'bracket_paste_flag "1" 'mouse_standard_flag "1"
+                 'mouse_button_flag "1" 'mouse_all_flag "1"
+                 'mouse_sgr_flag "1" 'mouse_utf8_flag "1"
+                 'cursor_flag "0" 'wrap_flag "0"))
+               nil "x" nil 3)))
+    (dolist (sequence '("\e[4h" "\e[?1h" "\e=" "\e[?2004h" "\e[?1000h"
+                        "\e[?1002h" "\e[?1003h" "\e[?1006h" "\e[?1005h"
+                        "\e[?25l" "\e[?7l"))
+      (should (string-search sequence data)))))
+
+(ert-deftest ghostel-tmux-test-backfill-restores-scroll-region ()
+  "Only a region that is not the whole screen is set, keeping the cursor."
+  (let ((state (ghostel-tmux--parse-pane-state
+                (ghostel-tmux-test--pane-state 'scroll_region_upper "1"))))
+    (should (string-suffix-p
+             "\e[2A\e[1G\e7\e[2;3r\e8"
+             (ghostel-tmux--backfill-data state nil "x" nil 3)))
+    ;; tmux resets the region when it resizes the pane to a terminal.
+    (should-not (string-search
+                 "r" (ghostel-tmux--backfill-data state nil "x" nil 9))))
+  (should-not (string-search
+               "r" (ghostel-tmux--backfill-data
+                    (ghostel-tmux--parse-pane-state
+                     (ghostel-tmux-test--pane-state))
+                    nil "x" nil 3))))
+
+(ert-deftest ghostel-tmux-test-backfill-recreates-alternate-screen ()
+  "History and the primary screen go below the alternate screen."
+  (should (equal (ghostel-tmux--backfill-data
+                  (ghostel-tmux--parse-pane-state
+                   (ghostel-tmux-test--pane-state
+                    'alternate_on "1" 'alternate_saved_x "6"
+                    'alternate_saved_y "1" 'cursor_x "3" 'cursor_y "2"))
+                  "p1\np2\np3" "h1\nh2\na1\n\n" "a1\n\n" 3)
+                 (concat "h1\r\nh2\e[m\r\np1\r\np2\r\np3\e[m\e[1A\e[7G"
+                         "\e[?1049h\e[2J\e[Ha1\r\n\r\n\e[m\e[4G"))))
+
+(ert-deftest ghostel-tmux-test-backfill-alternate-screen-with-joined-rows ()
+  "A wrapped row of the alternate screen is not taken for a history row."
+  (should (string-prefix-p
+           "h1\e[m\r\np1\r\np2\r\np3\e[m\e[2A\e[1G\e[?1049h\e[2J\e[Hjoined\r\na2\e[m"
+           (ghostel-tmux--backfill-data
+            (ghostel-tmux--parse-pane-state
+             (ghostel-tmux-test--pane-state 'alternate_on "1"))
+            "p1\np2\np3" "h1\njoined\na2" "joined\na2" 3))))
+
+(ert-deftest ghostel-tmux-test-backfill-primary-screen-of-another-height ()
+  "The saved cursor belongs to the primary screen's rows, not the pane's.
+tmux resizes that screen when the pane leaves the alternate one."
+  (let ((state (ghostel-tmux--parse-pane-state
+                (ghostel-tmux-test--pane-state
+                 'alternate_on "1" 'alternate_saved_y "4"
+                 'pane_height "2" 'scroll_region_lower "1"))))
+    ;; Five rows, the cursor on the last, in a pane now two rows high.
+    (should (string-prefix-p
+             "p1\r\np2\r\np3\r\np4\r\np5\e[m\e[1G\e[?1049h"
+             (ghostel-tmux--backfill-data
+              state "p1\np2\np3\np4\np5" "a1\na2" "a1\na2" 2))))
+  ;; Rows below the saved cursor go first in a lower terminal.
+  (should (string-prefix-p
+           "p1\r\n\e[m\e[1A\e[1G\e[?1049h"
+           (ghostel-tmux--backfill-data
+            (ghostel-tmux--parse-pane-state
+             (ghostel-tmux-test--pane-state 'alternate_on "1"
+                                            'alternate_saved_y "0"))
+            "p1\n\n\n\n" "a1\n\n" "a1\n\n" 2))))
+
+(ert-deftest ghostel-tmux-test-backfill-resets-pen-after-each-capture ()
+  "A capture ends in the colors of its last cell, and sets none at its start."
+  (let ((data (ghostel-tmux--backfill-data
+               (ghostel-tmux--parse-pane-state
+                (ghostel-tmux-test--pane-state 'alternate_on "1"))
+               "\\033[7mp" "\\033[7mh\n\\033[7ma" "\\033[7ma" 3)))
+    (should (string-search "\e[7mh\e[m" data))
+    (should (string-search "\e[7mp\e[m" data))
+    (should (string-search "\e[7ma\e[m" data))))
+
+(ert-deftest ghostel-tmux-test-backfill-stays-bytes ()
+  "UTF-8 rows and an escape above 127 keep their bytes in every path."
+  (dolist (state (list (ghostel-tmux-test--pane-state)
+                       (ghostel-tmux-test--pane-state 'alternate_on "1")))
+    (let ((data (ghostel-tmux--backfill-data
+                 (ghostel-tmux--parse-pane-state state)
+                 "\303\244" "\303\244\\310\n\n\303\244"
+                 "\303\244\\310\n\n\303\244" 3)))
+      (should-not (multibyte-string-p data))
+      (should (string-search "\303\244\310" data)))))
+
+(ert-deftest ghostel-tmux-test-bootstrap-pane-takes-four-replies ()
+  "One write asks for all; the replies arrive in order, then the backfill."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (got nil) (ghostel-tmux-history-lines 7))
+      (ghostel-tmux-test--with-wire ctl sent
+        (cl-letf (((symbol-function 'ghostel-tmux--receive-pane-backfill)
+                   (lambda (&rest args) (setq got args))))
+          (ghostel-tmux--bootstrap-pane ctl 5)
+          (should (= 1 (length sent)))
+          (should (string-match-p
+                   (concat "\\`display-message -p -t %5 '[^\n]*'\n"
+                           "capture-pane -aq -peC -t %5\n"
+                           "capture-pane -peJC -t %5 -S -7\n"
+                           "capture-pane -peJC -t %5\n\\'")
+                   (car sent)))
+          (ghostel-tmux-test--feed ctl "%begin 1 1 1\r\nstate\r\n%end 1 1 1\r\n")
+          (ghostel-tmux-test--feed ctl "%begin 1 2 1\r\n%error 1 2 1\r\n")
+          (ghostel-tmux-test--feed ctl "%begin 1 3 1\r\nrows\r\n%end 1 3 1\r\n")
+          (should-not got)
+          (ghostel-tmux--queue-command "behind")
+          (ghostel-tmux--pump-deferred ctl)
+          (should (= 1 (length sent)))
+          (ghostel-tmux-test--feed ctl "%begin 1 4 1\r\nscreen\r\n%end 1 4 1\r\n")
+          (should (equal got (list ctl 5 "state" nil "rows" "screen")))
+          (ghostel-tmux--pump-deferred ctl)
+          (should (equal (car sent) "behind\n")))))))
+
+(ert-deftest ghostel-tmux-test-bootstrap-pane-gone-between-replies ()
+  "A pane lost between the replies changes nothing for the commands behind."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux--bootstrap-pane ctl 5)
+        (ghostel-tmux--queue-command "behind")
+        (dotimes (i 4)
+          (ghostel-tmux-test--feed
+           ctl (format "%%begin 1 %d 1\r\n%%error 1 %d 1\r\n" i i)))
+        (ghostel-tmux--pump-deferred ctl)
+        (should (equal (car sent) "behind\n"))))))
 
 (ert-deftest ghostel-tmux-test-bootstrap-queued-once-per-pane ()
   ;; A second %layout-change arriving before the first capture-pane
@@ -1338,7 +1556,7 @@
       (unwind-protect
           (cl-letf (((symbol-function 'ghostel-tmux--queue-command)
                      (lambda (cmd &optional _cont)
-                       (when (string-prefix-p "capture-pane" cmd)
+                       (when (string-search "capture-pane" cmd)
                          (cl-incf captures))))
                     ((symbol-function 'get-buffer-window-list)
                      (lambda (&rest _) nil))
