@@ -2140,11 +2140,16 @@ of a replaced token do nothing."
   "Resize the pane terminal when this buffer becomes WINDOW's content.
 Hook for `window-buffer-change-functions': covers tab-line clicks and
 any other path that swaps the buffer into a window without going
-through `ghostel-tmux--display-pane-in-window'."
+through `ghostel-tmux--display-pane-in-window'.  From Emacs 31 the hook
+runs in its buffer, also for the buffer WINDOW lost; before, in whatever
+buffer is current."
   (when (and (window-live-p window)
-             (eq (window-buffer window) (current-buffer))
-             (buffer-live-p ghostel-tmux--controller-buffer))
-    (ghostel-tmux--apply-pane-size (current-buffer) window)))
+             (or (< emacs-major-version 31)
+                 (eq (window-buffer window) (current-buffer))))
+    (let ((pane (window-buffer window)))
+      (when (buffer-live-p (buffer-local-value
+                            'ghostel-tmux--controller-buffer pane))
+        (ghostel-tmux--apply-pane-size pane window)))))
 
 (defun ghostel-tmux--attach-pane ()
   "Return the buffer of tmux's active pane, or the one standing in for it.

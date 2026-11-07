@@ -1297,6 +1297,54 @@ fills its output queue between the two repeats the CR."
                            (list (cons buf 'fake-window))))))
       (kill-buffer buf))))
 
+(ert-deftest ghostel-tmux-test-on-window-buffer-change-skips-the-lost-buffer ()
+  ;; From Emacs 31 the hook also runs for the buffer the window lost.
+  (let ((buf (generate-new-buffer "*ghostel-tmux:bch-l%0*"))
+        (emacs-major-version 31)
+        (resized nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
+                   (lambda (b w) (push (cons b w) resized))))
+          (with-current-buffer buf
+            (setq-local ghostel-tmux--controller-buffer buf))
+          (with-temp-buffer
+            (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                      ((symbol-function 'window-buffer)
+                       (lambda (_) buf)))
+              (ghostel-tmux--on-window-buffer-change 'fake-window)))
+          (should-not resized))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-tmux-test-on-window-buffer-change-in-another-buffer ()
+  ;; Before Emacs 31 a buffer-local hook runs in any current buffer.
+  (let ((buf (generate-new-buffer "*ghostel-tmux:bch-o%0*"))
+        (emacs-major-version 30)
+        (resized nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
+                   (lambda (b w) (push (cons b w) resized))))
+          (with-current-buffer buf
+            (setq-local ghostel-tmux--controller-buffer buf))
+          (with-temp-buffer
+            (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                      ((symbol-function 'window-buffer)
+                       (lambda (_) buf)))
+              (ghostel-tmux--on-window-buffer-change 'fake-window)))
+          (should (equal resized (list (cons buf 'fake-window)))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-tmux-test-on-window-buffer-change-skips-a-sealed-pane ()
+  (let ((buf (generate-new-buffer "*ghostel-tmux:bch-s%0*"))
+        (resized nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
+                   (lambda (b w) (push (cons b w) resized)))
+                  ((symbol-function 'window-live-p) (lambda (_) t))
+                  ((symbol-function 'window-buffer) (lambda (_) buf)))
+          (ghostel-tmux--on-window-buffer-change 'fake-window)
+          (should-not resized))
+      (kill-buffer buf))))
+
 ;; ---------------------------------------------------------------------------
 ;; ghostel-tmux--spawn-controller command construction
 ;; ---------------------------------------------------------------------------
