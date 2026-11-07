@@ -1586,6 +1586,223 @@
       (when (buffer-live-p dead-ctl) (kill-buffer dead-ctl)))))
 
 
+(ert-deftest ghostel-tmux-test-sentinel-kills-controller-buffer ()
+  "A controller without a process has no further use."
+  (let ((ctl (generate-new-buffer " *ghostel-tmux-test-ctl*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer ctl
+            (ghostel-tmux-control-mode))
+          (cl-letf (((symbol-function 'process-buffer) (lambda (_p) ctl))
+                    ((symbol-function 'process-live-p) (lambda (_p) nil)))
+            (ghostel-tmux--sentinel 'fake-proc "finished\n"))
+          (should-not (buffer-live-p ctl)))
+      (when (buffer-live-p ctl) (kill-buffer ctl)))))
+
+(ert-deftest ghostel-tmux-test-startup-error-is-the-exit-reason ()
+  "tmux's own failed startup command says why it leaves."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--feed
+     ctl (concat "\eP1000p%begin 1 1 0\r\ncan't find session: x\r\n"
+                 "%error 1 1 0\r\n%exit\r\n"))
+    (should (equal ghostel-tmux--exit-reason "can't find session: x"))
+    (should (equal (ghostel-tmux--exit-suffix) ": can't find session: x"))))
+
+(ert-deftest ghostel-tmux-test-startup-error-is-decoded ()
+  "The reason arrives as UTF-8 bytes."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--feed
+     ctl (concat "\eP1000p%begin 1 1 0\r\n"
+                 (encode-coding-string "can't find session: été" 'utf-8)
+                 "\r\n%error 1 1 0\r\n"))
+    (should (equal ghostel-tmux--exit-reason "can't find session: été"))))
+
+(ert-deftest ghostel-tmux-test-exit-message-names-the-reason ()
+  "`%exit' after a failed startup says why."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (ghostel-tmux-test--feed
+         ctl (concat "\eP1000p%begin 1 1 0\r\nno sessions\r\n"
+                     "%error 1 1 0\r\n%exit\r\n")))
+      (should (member "Ghostel-tmux: tmux exited: no sessions" messages)))))
+
+(ert-deftest ghostel-tmux-test-takeover-reports-and-forgets-the-reason ()
+  "A failed attach in a host says why; the next attach starts without it."
+  (ghostel-tmux-test--with-host host
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (ghostel-tmux--enter-control-mode host)
+        (ghostel-tmux-test--feed
+         host (concat "%begin 1 1 0\r\nno sessions\r\n"
+                      "%error 1 1 0\r\n%exit\r\n"))
+        (ghostel-tmux--exit-control-mode host)
+        (should (seq-find (lambda (m)
+                            (and (string-search "Exited control mode" m)
+                                 (string-suffix-p ": no sessions" m)))
+                          messages))
+        (ghostel-tmux--enter-control-mode host)
+        (should-not ghostel-tmux--exit-reason)
+        (ghostel-tmux--exit-control-mode host)))))
+
+(ert-deftest ghostel-tmux-test-command-error-is-no-exit-reason ()
+  "The failure of a command of ours says nothing about leaving."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux--queue-command "x")
+        (ghostel-tmux-test--feed
+         ctl "%begin 1 1 1\r\nnope\r\n%error 1 1 1\r\n")
+        (should-not ghostel-tmux--exit-reason)
+        (should (equal (ghostel-tmux--exit-suffix) ""))))))
+
+(ert-deftest ghostel-tmux-test-startup-error-after-attach-is-no-exit-reason ()
+  "A startup command failing behind a good attach does not end the session."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--feed
+     ctl (concat "\eP1000p%begin 1 1 0\r\n%end 1 1 0\r\n"
+                 "%session-changed $0 good\r\n"
+                 "%begin 1 2 0\r\ncan't find session: x\r\n%error 1 2 0\r\n"))
+    (should-not ghostel-tmux--exit-reason)))
+
+(ert-deftest ghostel-tmux-test-exit-reason-prefers-exit-line ()
+  "The reason on the `%exit' line wins."
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--exit-reason "old")
+    (ghostel-tmux--on-exit "server exited")
+    (should (equal ghostel-tmux--exit-reason "server exited"))
+    (ghostel-tmux--on-exit "")
+    (should (equal ghostel-tmux--exit-reason "server exited"))))
+
+(defun ghostel-tmux-test--script (body)
+  "Return the path of an executable shell script running BODY."
+  (let ((path (make-temp-file "ghostel-tmux-script-" nil ".sh")))
+    (with-temp-file path
+      (insert "#!/bin/sh\n" body "\n"))
+    (set-file-modes path #o755)
+    path))
+
+(ert-deftest ghostel-tmux-test-failed-attach-ends-the-wait ()
+  "A tmux that dies ends the wait at once and leaves no controller."
+  (let* ((script (ghostel-tmux-test--script
+                  (concat "printf '\\033P1000p%%begin 1 1 0\\r\\n"
+                          "no such session\\r\\n%%error 1 1 0\\r\\n"
+                          "%%exit\\r\\n\\033\\\\'")))
+         (ghostel-tmux-program script)
+         (start (float-time))
+         (messages nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) messages))))
+          (ghostel-tmux-attach "x")
+          ;; The sentinel may still be on its way when tmux has just died.
+          (let ((deadline (+ (float-time) 2)))
+            (while (and (< (float-time) deadline)
+                        (seq-find (lambda (b)
+                                    (string-prefix-p " *ghostel-tmux-control:x"
+                                                     (buffer-name b)))
+                                  (buffer-list)))
+              (accept-process-output nil 0.02)))
+          (should (< (- (float-time) start) 2))
+          (should-not (seq-find (lambda (b)
+                                  (string-prefix-p " *ghostel-tmux-control:x"
+                                                   (buffer-name b)))
+                                (buffer-list)))
+          (should (seq-find (lambda (m) (string-search "no such session" m))
+                            messages))
+          (should-not (seq-find (lambda (m) (string-search "Still waiting" m))
+                                messages)))
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-dead-tmux-ends-the-wait-before-its-sentinel ()
+  "A dead tmux whose sentinel has not run yet does not keep the wait spinning."
+  (let* ((script (ghostel-tmux-test--script "exit 1"))
+         (ghostel-tmux-program script)
+         (ctl nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ghostel-tmux--sentinel) #'ignore))
+          (setq ctl (ghostel-tmux--spawn-controller "dead" nil))
+          (let ((start (float-time)))
+            (ghostel-tmux--wait-for-pane ctl 3)
+            (should (< (- (float-time) start) 2))))
+      (when (buffer-live-p ctl) (kill-buffer ctl))
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-text-before-the-frame-is-the-exit-reason ()
+  "What a tmux that never reached control mode printed is reported."
+  (let* ((script (ghostel-tmux-test--script "echo 'bad version' >&2; exit 3"))
+         (ghostel-tmux-program script)
+         (messages nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) messages))))
+          (ghostel-tmux-attach "pre")
+          (let ((deadline (+ (float-time) 2)))
+            (while (and (< (float-time) deadline)
+                        (not (seq-find (lambda (m) (string-search "code 3" m))
+                                       messages)))
+              (accept-process-output nil 0.02)))
+          (should (member "Ghostel-tmux: exited abnormally with code 3: bad version"
+                          messages)))
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-failed-spawn-leaves-no-controller ()
+  "A tmux that cannot be started signals and leaves no buffer behind."
+  (let ((ghostel-tmux-program "ghostel-tmux-test-no-such-program")
+        (before (buffer-list)))
+    (should-error (ghostel-tmux--spawn-controller "gone" nil)
+                  :type 'file-missing)
+    (should-not (seq-difference (buffer-list) before))))
+
+(ert-deftest ghostel-tmux-test-pane-at-the-deadline-gets-the-window ()
+  "A pane arriving with the last read is shown, not waited for."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         (ctl (ghostel-tmux--spawn-controller "edge" nil))
+         (pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+         (read nil)
+         (shown nil))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'accept-process-output)
+                     (lambda (&rest _)
+                       (setq read t)
+                       (sleep-for 0.02)))
+                    ((symbol-function 'ghostel-tmux--pane-list)
+                     (lambda (_controller) (and read (list pane))))
+                    ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                     (lambda (buf _window) (setq shown buf))))
+            (ghostel-tmux--wait-for-pane ctl 0.01))
+          (should (eq shown pane))
+          (should-not (buffer-local-value 'ghostel-tmux--auto-host-window ctl)))
+      (kill-buffer pane)
+      (kill-buffer ctl)
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-slow-attach-keeps-the-window ()
+  "A pane later than the wait still gets the window it was asked for."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         (ctl (ghostel-tmux--spawn-controller "slow" nil))
+         (messages nil))
+    (unwind-protect
+        (progn
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args)
+                       (push (apply #'format fmt args) messages))))
+            (ghostel-tmux--wait-for-pane ctl 0.1))
+          (should (eq (buffer-local-value 'ghostel-tmux--auto-host-window ctl)
+                      (selected-window)))
+          (should (member "Ghostel-tmux: Still waiting for tmux" messages)))
+      (kill-buffer ctl)
+      (delete-file script))))
+
 (ert-deftest ghostel-tmux-test-cmd-routes-through-queue ()
   ;; `--cmd' must use the command queue so tmux replies come back
   ;; correlated with the command, not eaten by another block.

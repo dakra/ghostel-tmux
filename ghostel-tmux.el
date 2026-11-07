@@ -172,7 +172,7 @@ materialize the pane buffers).  Consumed by `--on-layout-change'.")
   "Most-recently-displayed pane buffer, used to focus user actions.")
 
 (defvar-local ghostel-tmux--exit-reason nil
-  "Reason string from `%exit', for diagnostics.")
+  "Why tmux is leaving, from `%exit', a failed startup or text before the frame.")
 
 (defvar-local ghostel-tmux--closing nil
   "Non-nil once tmux is leaving control mode.
@@ -409,9 +409,9 @@ Splits on newlines, dispatches per-line via the state machine."
                     (substring ghostel-tmux--line-buffer idx)
                   "")))))))
 
-(defun ghostel-tmux--decode-name (name)
-  "Return NAME, a session or window name as sent by tmux, as text."
-  (decode-coding-string name 'utf-8))
+(defun ghostel-tmux--decode-text (text)
+  "Return TEXT from the wire, which is UTF-8 bytes, as text."
+  (decode-coding-string text 'utf-8))
 
 (defun ghostel-tmux--handle-line (line)
   "Dispatch a single LINE (no trailing CRLF) through the state machine."
@@ -466,6 +466,12 @@ showing a control-mode transcript)."
               ghostel-tmux--block-tag nil
               ghostel-tmux--parser-state 'idle
               ghostel-tmux--command-in-flight nil)
+        ;; A startup command that fails after the attach ends nothing.
+        (when (and (null cmd)
+                   (null ghostel-tmux--session-id)
+                   (equal kind "error"))
+          (setq ghostel-tmux--exit-reason
+                (ghostel-tmux--decode-text (string-trim payload))))
         (when cmd
           (let ((cont (cdr cmd)))
             (when cont
@@ -552,7 +558,7 @@ for a wedged parser."
    ((string-match "\\`%session-changed \\$\\([0-9]+\\) \\(.+\\)\\'" line)
     (ghostel-tmux--on-session-changed
      (string-to-number (match-string 1 line))
-     (ghostel-tmux--decode-name (match-string 2 line))))
+     (ghostel-tmux--decode-text (match-string 2 line))))
    ((string-match "\\`%session-window-changed \\$\\([0-9]+\\) @\\([0-9]+\\)\\'"
                   line)
     (ghostel-tmux--on-session-window-changed
@@ -562,7 +568,7 @@ for a wedged parser."
    ;; versions emit the name alone.
    ((string-match "\\`%session-renamed \\(?:\\$\\([0-9]+\\) \\)?\\(.+\\)\\'" line)
     (let ((sid (match-string 1 line))
-          (name (ghostel-tmux--decode-name (match-string 2 line))))
+          (name (ghostel-tmux--decode-text (match-string 2 line))))
       ;; Sent for every session on the server.
       (when (or (null sid)
                 (eql (string-to-number sid) ghostel-tmux--session-id))
@@ -583,7 +589,7 @@ for a wedged parser."
    ((string-match "\\`%window-renamed @\\([0-9]+\\) \\(.*\\)\\'" line)
     (ghostel-tmux--on-window-renamed
      (string-to-number (match-string 1 line))
-     (ghostel-tmux--decode-name (match-string 2 line))))
+     (ghostel-tmux--decode-text (match-string 2 line))))
    ((string-match
      "\\`%window-pane-changed @\\([0-9]+\\) %\\([0-9]+\\)\\'" line)
     (ghostel-tmux--on-window-pane-changed
@@ -1092,13 +1098,19 @@ shown keeps the size of its Emacs window."
 
 (defun ghostel-tmux--on-exit (reason)
   "Handle `%exit' from tmux, recording REASON if given."
-  (setq ghostel-tmux--exit-reason (or reason "")
+  (setq ghostel-tmux--exit-reason (if (or (null reason) (string-empty-p reason))
+                                      ghostel-tmux--exit-reason
+                                    reason)
         ghostel-tmux--closing t
         ghostel-tmux--command-queue nil)
-  (message "Ghostel-tmux: tmux exited%s"
-           (if (and reason (not (string-empty-p reason)))
-               (format ": %s" reason)
-             "")))
+  (message "Ghostel-tmux: tmux exited%s" (ghostel-tmux--exit-suffix)))
+
+(defun ghostel-tmux--exit-suffix ()
+  "Return the text to add to a message that tmux left, naming the reason."
+  (if (and ghostel-tmux--exit-reason
+           (not (string-empty-p ghostel-tmux--exit-reason)))
+      (format ": %s" ghostel-tmux--exit-reason)
+    ""))
 
 
 ;; Bootstrap sequence
@@ -1130,7 +1142,7 @@ every tab and non-ASCII character of the row as `_'."
     (list (string-to-number (match-string 1 line))
           (string-to-number (match-string 2 line))
           (equal (match-string 3 line) "1")
-          (ghostel-tmux--decode-name (match-string 4 line))
+          (ghostel-tmux--decode-text (match-string 4 line))
           (match-string 5 line)
           (match-string 6 line))))
 
@@ -1276,14 +1288,23 @@ responses to OSC/DA/cursor queries) are dropped — see
 When the controller dies — whether cleanly or because tmux got killed
 externally — seal each pane buffer so users' keystrokes don't silently
 no-op against a dead process.  Panes are sealed even when the
-controller buffer itself was killed before the process died."
+controller buffer itself was killed before the process died.  The
+controller buffer has no further use and goes away."
   (unless (process-live-p proc)
-    (let ((buf (process-buffer proc)))
+    (let ((buf (process-buffer proc))
+          (suffix ""))
       (ghostel-tmux--seal-panes buf)
       (when (buffer-live-p buf)
         (with-current-buffer buf
-          (ghostel-tmux--refresh-tab-line)))
-      (message "Ghostel-tmux: %s" (string-trim event)))))
+          ;; What a tmux that never reached control mode printed.
+          (when (eq ghostel-tmux--parser-state 'preamble)
+            (setq ghostel-tmux--exit-reason
+                  (ghostel-tmux--decode-text
+                   (string-trim ghostel-tmux--line-buffer))))
+          (setq suffix (ghostel-tmux--exit-suffix))
+          (ghostel-tmux--refresh-tab-line))
+        (kill-buffer buf))
+      (message "Ghostel-tmux: %s%s" (string-trim event) suffix))))
 
 
 ;; Modes
@@ -1726,6 +1747,7 @@ front-end."
           ghostel-tmux--command-queue nil
           ghostel-tmux--command-in-flight nil
           ghostel-tmux--closing nil
+          ghostel-tmux--exit-reason nil
           ghostel-tmux--session-id nil
           ghostel-tmux--panes (make-hash-table)
           ghostel-tmux--windows (make-hash-table)
@@ -1779,8 +1801,8 @@ them are returned to the host buffer so the user lands back at the shell."
       (let ((original ghostel-tmux--auto-original-name))
         (setq ghostel-tmux--auto-original-name nil)
         (ignore-errors (rename-buffer original t))))
-    (message "Ghostel-tmux: Exited control mode (buffer %s)"
-             (buffer-name buf))))
+    (message "Ghostel-tmux: Exited control mode (buffer %s)%s"
+             (buffer-name buf) (ghostel-tmux--exit-suffix))))
 
 (defun ghostel-tmux--host-exited (buf _event)
   "Seal pane state when the auto-takeover host BUF's shell dies.
@@ -1832,20 +1854,24 @@ of arguments after \"tmux -CC\".  `-u' keeps non-ASCII text intact in
 any locale.  Returns the controller buffer."
   (let ((control-buf (generate-new-buffer
                       (format " *ghostel-tmux-control:%s*" session))))
-    (with-current-buffer control-buf
-      (ghostel-tmux-control-mode)
-      (let* ((proc (make-process
-                    :name (format "ghostel-tmux-%s" session)
-                    :buffer control-buf
-                    :command `(,ghostel-tmux-program "-u" "-CC" ,@tmux-args)
-                    :coding 'binary
-                    :connection-type 'pty
-                    :noquery t
-                    :filter #'ghostel-tmux--filter
-                    :sentinel #'ghostel-tmux--sentinel)))
-        (set-process-query-on-exit-flag proc nil)
-        (setq ghostel-tmux--controller-process proc
-              ghostel-tmux--session-name session)))
+    (condition-case err
+        (with-current-buffer control-buf
+          (ghostel-tmux-control-mode)
+          (let* ((proc (make-process
+                        :name (format "ghostel-tmux-%s" session)
+                        :buffer control-buf
+                        :command `(,ghostel-tmux-program "-u" "-CC" ,@tmux-args)
+                        :coding 'binary
+                        :connection-type 'pty
+                        :noquery t
+                        :filter #'ghostel-tmux--filter
+                        :sentinel #'ghostel-tmux--sentinel)))
+            (set-process-query-on-exit-flag proc nil)
+            (setq ghostel-tmux--controller-process proc
+                  ghostel-tmux--session-name session)))
+      (error
+       (kill-buffer control-buf)
+       (signal (car err) (cdr err))))
     control-buf))
 
 (defun ghostel-tmux--apply-pane-size (pane-buf window)
@@ -1957,23 +1983,30 @@ through `ghostel-tmux--display-pane-in-window'."
 (defun ghostel-tmux--wait-for-pane (control-buf timeout)
   "Block up to TIMEOUT seconds for CONTROL-BUF to materialize a pane.
 Switches the selected window to tmux's active pane when one appears,
-or to the first pane while the active one is unknown."
+or to the first pane while the active one is unknown.  A tmux that dies
+ends the wait; the sentinel reports it.  A pane later than TIMEOUT
+still gets the window."
   (let ((target-window (selected-window))
-        (deadline (+ (float-time) timeout)))
-    (catch 'done
-      (while (< (float-time) deadline)
-        (let ((panes (ghostel-tmux--pane-list control-buf)))
-          (when panes
-            (ghostel-tmux--display-pane-in-window
-             (or (with-current-buffer control-buf
-                   (gethash ghostel-tmux--active-pane-id ghostel-tmux--panes))
-                 (car panes))
-             target-window)
-            (throw 'done t)))
-        (accept-process-output
-         (with-current-buffer control-buf
-           ghostel-tmux--controller-process)
-         0.1)))))
+        (deadline (+ (float-time) timeout))
+        (proc (buffer-local-value 'ghostel-tmux--controller-process
+                                  control-buf))
+        panes)
+    (while (and (buffer-live-p control-buf)
+                (not (setq panes (ghostel-tmux--pane-list control-buf)))
+                (process-live-p proc)
+                (< (float-time) deadline))
+      (accept-process-output proc 0.1))
+    (cond
+     (panes
+      (ghostel-tmux--display-pane-in-window
+       (or (with-current-buffer control-buf
+             (gethash ghostel-tmux--active-pane-id ghostel-tmux--panes))
+           (car panes))
+       target-window))
+     ((and (process-live-p proc) (buffer-live-p control-buf))
+      (with-current-buffer control-buf
+        (setq ghostel-tmux--auto-host-window target-window))
+      (message "Ghostel-tmux: Still waiting for tmux")))))
 
 ;;;###autoload
 (defun ghostel-tmux-attach (session)

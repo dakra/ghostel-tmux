@@ -18,6 +18,12 @@
     {"wait": "until", "pred": "(> (string-to-number (elate-tmux-q \"#{history_size}\" \"d1\")) 2900)"},
     {"wait": "until", "pred": "(string-match-p \"^IND2$\" (elate-tmux-call \"capture-pane\" \"-p\" \"-t\" \"d2\"))"},
 
+    {"group": "failed attach", "comment": "tmux's reason reaches the user, at once, and nothing stays behind"},
+    {"eval": "(let ((start (float-time))) (ghostel-tmux-attach \"nosuch\") (setq elate-took (- (float-time) start)) t)"},
+    {"wait": "until", "pred": "(null (seq-find (lambda (b) (string-prefix-p \" *ghostel-tmux-control:\" (buffer-name b))) (buffer-list)))"},
+    {"assert": {"eval": "(< elate-took 2)"}},
+    {"assert": {"eval": "(with-current-buffer \"*Messages*\" (save-excursion (goto-char (point-min)) (search-forward \"can't find session\" nil t)))"}},
+
     {"group": "attach", "comment": "M-x ghostel-tmux-attach asks for the session and backfills its history"},
     {"keys": "M-x ghostel-tmux-attach RET", "delivery": "events"},
     {"wait": "until", "pred": "(elate-tmux-asking-p \"tmux session: \")"},
