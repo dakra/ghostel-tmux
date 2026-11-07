@@ -114,6 +114,12 @@
     {"wait": "until", "pred": "(and (equal (elate-tmux-q \"#{window_index}\" \"d4\") \"0\") (equal (elate-tmux-id) elate-w0b) (elate-tmux-sync-p))", "comment": "the selection reaches our session, not the grouped one that was active last"},
     {"keys": "C-c C-n"},
     {"wait": "until", "pred": "(and (equal (elate-tmux-q \"#{window_index}\" \"d4\") \"1\") (elate-tmux-sync-p))"},
+    {"eval": "(progn (setq elate-cur (elate-tmux-id)) (elate-tmux-call \"kill-session\" \"-t\" \"d4g\") (sit-for 0.5) t)", "comment": "tmux reports the shared windows as closed"},
+    {"assert": {"eval": "(and (equal (elate-tmux-id) elate-cur) (elate-tmux-sync-p))"}},
+    {"keys": "C-t n"},
+    {"wait": "until", "pred": "(and (equal (elate-tmux-q \"#{window_index}\" \"d4\") \"0\") (elate-tmux-sync-p))"},
+    {"keys": "C-t n"},
+    {"wait": "until", "pred": "(and (equal (elate-tmux-q \"#{window_index}\" \"d4\") \"1\") (elate-tmux-sync-p))"},
 
     {"group": "scripted window", "comment": "a window made and split in one go keeps the pane tmux left active, here not the first"},
     {"eval": "(progn (elate-tmux-call \"new-window\" \"-t\" \"d4\" \";\" \"split-window\" \"-t\" \"d4\") t)"},
@@ -143,7 +149,7 @@
     {"assert": {"eval": "(equal (elate-tmux-q \"#{pane_id}\" \"d5\") elate-cur)"}},
     {"keys": "C-c C-d"},
     {"wait": "until", "pred": "(and (null (elate-tmux-controllers)) (null (elate-tmux-panes)))"},
-    {"eval": "(progn (elate-tmux-call \"kill-session\" \"-t\" \"d4g\") (elate-tmux-call \"kill-session\" \"-t\" \"d4\") (elate-tmux-call \"kill-session\" \"-t\" \"d5\") t)"},
+    {"eval": "(progn (elate-tmux-call \"kill-session\" \"-t\" \"d4\") (elate-tmux-call \"kill-session\" \"-t\" \"d5\") t)"},
 
     {"group": "new", "comment": "M-x ghostel-tmux-new creates `main', and attaches to it the second time"},
     {"keys": "M-x ghostel-tmux-new RET", "delivery": "events"},

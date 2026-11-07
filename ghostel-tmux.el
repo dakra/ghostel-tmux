@@ -568,12 +568,13 @@ for a wedged parser."
    ((string-match "\\`%window-add @\\([0-9]+\\)\\'" line)
     (ghostel-tmux--on-window-add
      (string-to-number (match-string 1 line))))
-   ((string-match "\\`%\\(?:unlinked-\\)?window-close @\\([0-9]+\\)\\'" line)
-    ;; tmux 3.6 emits `%unlinked-window-close @WID' for the client whose
-    ;; session no longer contains the window — which is the only client
-    ;; in the single-attach case — so the pane buffers stay orphaned
-    ;; unless we treat both forms as the close signal.
+   ((string-match "\\`%window-close @\\([0-9]+\\)\\'" line)
     (ghostel-tmux--on-window-close
+     (string-to-number (match-string 1 line))))
+   ;; Some tmux versions send this form for a window of this session
+   ;; too; either way the session no longer holds it.
+   ((string-match "\\`%unlinked-window-close @\\([0-9]+\\)\\'" line)
+    (ghostel-tmux--drop-window
      (string-to-number (match-string 1 line))))
    ((string-match "\\`%window-renamed @\\([0-9]+\\) \\(.*\\)\\'" line)
     (ghostel-tmux--on-window-renamed
@@ -590,12 +591,13 @@ for a wedged parser."
      ;; but `#{window_raw_flags}' can expand to "" for a window with no
      ;; printable flags, producing a trailing space we must tolerate.
      ;; Older tmux only emits the LAYOUT field.
-     "\\`%layout-change @\\([0-9]+\\) \\([^ ]+\\)\\(?: \\([^ ]*\\)\\)?\\(?: [^ ]*\\)\\{0,2\\} *\\'"
+     "\\`%layout-change @\\([0-9]+\\) \\([^ ]+\\)\\(?: \\([^ ]*\\)\\)?\\(?: \\([^ ]*\\)\\)?\\(?: [^ ]*\\)? *\\'"
      line)
     (ghostel-tmux--on-layout-change
      (string-to-number (match-string 1 line))
      (match-string 2 line)
-     (match-string 3 line)))
+     (match-string 3 line)
+     (match-string 4 line)))
    ((string-match "\\`%exit\\(?: \\(.*\\)\\)?\\'" line)
     (ghostel-tmux--on-exit (match-string 1 line)))
    (t
@@ -721,11 +723,16 @@ A nil WINDOW-NAME (we haven't been told yet) is rendered as
                   ghostel-resize-function #'ghostel-tmux--resize-pane))
           buf))))))
 
-(defun ghostel-tmux--remove-pane (controller pane-id)
-  "Drop pane PANE-ID from CONTROLLER and kill its buffer."
+(defun ghostel-tmux--remove-pane (controller pane-id &optional window-id)
+  "Drop pane PANE-ID from CONTROLLER and kill its buffer.
+With WINDOW-ID, keep a pane that has moved on to another window."
   (with-current-buffer controller
     (let ((buf (gethash pane-id ghostel-tmux--panes)))
-      (when buf
+      (when (and buf
+                 (or (null window-id)
+                     (not (buffer-live-p buf))
+                     (eql window-id (buffer-local-value
+                                     'ghostel-tmux--window-id buf))))
         (remhash pane-id ghostel-tmux--panes)
         (when (buffer-live-p buf)
           (when (eql pane-id ghostel-tmux--active-pane-id)
@@ -843,12 +850,25 @@ The selected window comes first."
        (ghostel-tmux--receive-window-rows output)))))
 
 (defun ghostel-tmux--on-window-close (wid)
-  "Handle `%window-close @WID': drop the window and its panes."
+  "Handle `%window-close @WID': drop the window if the session lost it.
+tmux also sends this when another session, such as a grouped one, lets
+go of a window this session keeps, so ask.  A session that ends sends
+`%exit' instead."
+  (when (gethash wid ghostel-tmux--windows)
+    (ghostel-tmux--queue-command
+     "list-windows -F \"#{window_id}\""
+     (lambda (output)
+       (when (and output
+                  (not (member (format "@%d" wid) (split-string output))))
+         (ghostel-tmux--drop-window wid))))))
+
+(defun ghostel-tmux--drop-window (wid)
+  "Forget window WID and kill its pane buffers."
   (let ((win (gethash wid ghostel-tmux--windows)))
     (when win
       (let ((panes (plist-get win :panes)))
         (dolist (pid panes)
-          (ghostel-tmux--remove-pane (current-buffer) pid))))
+          (ghostel-tmux--remove-pane (current-buffer) pid wid))))
     (remhash wid ghostel-tmux--windows))
   (setq ghostel-tmux--window-order
         (delq wid ghostel-tmux--window-order)))
@@ -937,7 +957,10 @@ and handled separately."
                ghostel-tmux--windows)))
   (when (eql wid ghostel-tmux--current-window-id)
     (setq ghostel-tmux--active-pane-id pid)
-    (ghostel-tmux--follow-active-pane pid)))
+    (ghostel-tmux--follow-active-pane pid)
+    ;; Following does nothing for a pane another Emacs window shows, and
+    ;; a zoom asked for the pane left would select that pane again.
+    (ghostel-tmux--rezoom-shown-pane wid nil)))
 
 (defun ghostel-tmux--on-session-window-changed (sid wid)
   "Handle `%session-window-changed $SID @WID': follow the new window.
@@ -965,10 +988,11 @@ still moving in (`join-pane'), waits for `--on-layout-change'."
        (t
         (setq ghostel-tmux--pending-follow-wid wid))))))
 
-(defun ghostel-tmux--on-layout-change (wid layout &optional visible-layout)
-  "Handle `%layout-change @WID LAYOUT VISIBLE-LAYOUT' — reconcile panes.
+(defun ghostel-tmux--on-layout-change (wid layout &optional visible-layout flags)
+  "Handle `%layout-change @WID LAYOUT VISIBLE-LAYOUT FLAGS' — reconcile panes.
 LAYOUT has every pane of the window, at its unzoomed size in a zoomed
-window; VISIBLE-LAYOUT has the panes on screen at their real size."
+window; VISIBLE-LAYOUT has the panes on screen at their real size.
+FLAGS are the window's flags, nil when not known."
   (let* ((panes (ghostel-tmux--parse-layout layout))
          (visible (and visible-layout
                        (not (string-empty-p visible-layout))
@@ -987,7 +1011,7 @@ window; VISIBLE-LAYOUT has the panes on screen at their real size."
             (append ghostel-tmux--window-order (list wid))))
     (dolist (pid old-ids)
       (unless (memq pid pane-ids)
-        (ghostel-tmux--remove-pane controller pid)))
+        (ghostel-tmux--remove-pane controller pid wid)))
     (dolist (rec panes)
       (let* ((pid (nth 0 rec))
              (size (or (assq pid visible) rec))
@@ -1046,7 +1070,21 @@ window; VISIBLE-LAYOUT has the panes on screen at their real size."
     (when (and ghostel-tmux--active-pane-id
                (memq ghostel-tmux--active-pane-id pane-ids))
       (ghostel-tmux--follow-active-pane ghostel-tmux--active-pane-id))
+    (ghostel-tmux--rezoom-shown-pane wid flags)
     (ghostel-tmux--refresh-tab-line)))
+
+(defun ghostel-tmux--rezoom-shown-pane (wid flags)
+  "Zoom the pane shown of window WID again, unless FLAGS say it is zoomed.
+tmux unzooms a window when a pane joins or leaves it, while the pane
+shown keeps the size of its Emacs window."
+  (let* ((pid ghostel-tmux--active-pane-id)
+         (buf (and pid (gethash pid ghostel-tmux--panes))))
+    (when (and (eql wid ghostel-tmux--current-window-id)
+               (buffer-live-p buf)
+               (memq pid (plist-get (gethash wid ghostel-tmux--windows) :panes))
+               (not (and flags (string-search "Z" flags)))
+               (get-buffer-window buf 'visible))
+      (ghostel-tmux--ensure-pane-zoomed wid pid))))
 
 (defun ghostel-tmux--on-exit (reason)
   "Handle `%exit' from tmux, recording REASON if given."
@@ -1396,10 +1434,6 @@ the `select-window'."
     (let ((name (read-string "rename session to: ")))
       (format "rename-session %s" (shell-quote-argument name))))
   "Rename the current tmux session.")
-
-(ghostel-tmux--define-prefix-cmd zoom "z"
-  (lambda (target) (format "resize-pane -Z -t %s" target))
-  "Toggle zoom on the current pane.")
 
 (ghostel-tmux--define-prefix-cmd cmd ":"
   (lambda (_target)

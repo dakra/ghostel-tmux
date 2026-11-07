@@ -94,7 +94,6 @@ over the active session, so they work the same whether you started tmux via
 | =C-t o=        | =select-pane -t :.+=    | Cycle to the next pane.                      |
 | =C-t ,=        | =rename-window=         | Prompt and rename the current window.       |
 | =C-t $=        | =rename-session=        | Prompt and rename the current session.      |
-| =C-t z=        | =resize-pane -Z=        | Toggle zoom on the current pane.            |
 | =C-t 0= ... =9=  | =select-window -t :N=   | Jump to window N.                            |
 | =C-t :=        | (prompt for any cmd)  | Run an arbitrary tmux command.               |
 | =C-t d=        | -                     | Detach (=ghostel-tmux-detach=).                |

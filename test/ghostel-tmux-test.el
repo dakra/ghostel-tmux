@@ -581,18 +581,6 @@
     (ghostel-tmux-pane-mode -1)
     (should-not (local-variable-p 'tab-line-tabs-function))))
 
-(ert-deftest ghostel-tmux-test-prefix-zoom ()
-  (let ((cmds nil))
-    (cl-letf (((symbol-function 'ghostel-tmux--cmd)
-               (lambda (c) (push c cmds))))
-      (with-temp-buffer
-        (setq-local ghostel-tmux--pane-id 1)
-        (ghostel-tmux--prefix-zoom)))
-    (should (equal cmds '("resize-pane -Z -t %1")))))
-
-;; Window-level commands target the session (`$SID') or window (`@WID'),
-;; not the pane (`%pid') — tmux doesn't accept a pane target for these.
-
 (ert-deftest ghostel-tmux-test-session-target-from-controller ()
   (ghostel-tmux-test--with-controller ctl
     (setq ghostel-tmux--session-id 4)
@@ -1387,33 +1375,118 @@
       (should (eql (plist-get (gethash 7 ghostel-tmux--windows) :active-pane)
                    3)))))
 
-(ert-deftest ghostel-tmux-test-window-close-removes-pane-buffer ()
-  (ghostel-tmux-test--with-controller ctl
-    (let ((pane (generate-new-buffer "*ghostel-tmux:s:w%5*")))
-      (unwind-protect
-          (with-current-buffer ctl
-            (puthash 5 pane ghostel-tmux--panes)
-            (puthash 0 (list :name "w" :panes (list 5))
-                     ghostel-tmux--windows)
-            (setq ghostel-tmux--window-order (list 0))
-            (ghostel-tmux--on-window-close 0)
-            (should-not (gethash 0 ghostel-tmux--windows))
-            (should-not (gethash 5 ghostel-tmux--panes))
-            (should-not (memq 0 ghostel-tmux--window-order)))
-        (when (buffer-live-p pane) (kill-buffer pane))))))
+(defmacro ghostel-tmux-test--with-window-pane (ctl pane &rest body)
+  "Run BODY in controller CTL with PANE, the buffer of %5, the pane of window @0."
+  (declare (indent 2))
+  `(let ((,pane (generate-new-buffer "*ghostel-tmux:s:w%5*")))
+     (unwind-protect
+         (with-current-buffer ,ctl
+           (with-current-buffer ,pane
+             (setq ghostel-tmux--window-id 0))
+           (puthash 5 ,pane ghostel-tmux--panes)
+           (puthash 0 (list :name "w" :panes (list 5))
+                    ghostel-tmux--windows)
+           (setq ghostel-tmux--window-order (list 0))
+           ,@body)
+       (when (buffer-live-p ,pane) (kill-buffer ,pane)))))
 
-(ert-deftest ghostel-tmux-test-unlinked-window-close-dispatches-as-close ()
-  ;; tmux 3.6 sends `%unlinked-window-close @WID' (not `%window-close')
-  ;; when the only client's session no longer has the window linked,
-  ;; which is exactly what fires when a shell exits in a non-current
-  ;; tmux window.  We must route it to `--on-window-close' or pane
-  ;; buffers leak.
-  (let ((seen nil))
-    (cl-letf (((symbol-function 'ghostel-tmux--on-window-close)
-               (lambda (wid) (push wid seen))))
-      (ghostel-tmux--dispatch-notification "%unlinked-window-close @2")
-      (ghostel-tmux--dispatch-notification "%window-close @3")
-      (should (equal (nreverse seen) '(2 3))))))
+(ert-deftest ghostel-tmux-test-window-close-removes-pane-buffer ()
+  "A window that tmux no longer lists loses its panes."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-window-pane ctl pane
+          (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
+          (ghostel-tmux--pump-deferred ctl)
+          (should (equal (car sent) "list-windows -F \"#{window_id}\"\n"))
+          (should (buffer-live-p pane))
+          (ghostel-tmux-test--reply ctl "@1\r\n")
+          (should-not (gethash 0 ghostel-tmux--windows))
+          (should-not (gethash 5 ghostel-tmux--panes))
+          (should-not (memq 0 ghostel-tmux--window-order))
+          (should-not (buffer-live-p pane)))))))
+
+(ert-deftest ghostel-tmux-test-window-close-keeps-window-of-session ()
+  "A window another session let go of stays, as tmux still lists it."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-window-pane ctl pane
+          (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
+          (ghostel-tmux--pump-deferred ctl)
+          (ghostel-tmux-test--reply ctl "@0\r\n@1\r\n")
+          (should (gethash 0 ghostel-tmux--windows))
+          (should (eq (gethash 5 ghostel-tmux--panes) pane))
+          (should (memq 0 ghostel-tmux--window-order))
+          (should (buffer-live-p pane)))))))
+
+(ert-deftest ghostel-tmux-test-window-close-keeps-pane-moved-away ()
+  "A pane another window has taken outlives the window it left."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-window-pane ctl pane
+          (with-current-buffer pane
+            (setq ghostel-tmux--window-id 1))
+          (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
+          (ghostel-tmux--pump-deferred ctl)
+          (ghostel-tmux-test--reply ctl "@1\r\n")
+          (should-not (gethash 0 ghostel-tmux--windows))
+          (should (eq (gethash 5 ghostel-tmux--panes) pane))
+          (should (buffer-live-p pane)))))))
+
+(ert-deftest ghostel-tmux-test-layout-change-keeps-pane-moved-away ()
+  "A pane another window has taken outlives the layout of the window it left."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-window-pane ctl pane
+      (with-current-buffer pane
+        (setq ghostel-tmux--window-id 1))
+      (let ((other (generate-new-buffer "*ghostel-tmux:s:w%6*")))
+        (unwind-protect
+            (progn
+              (with-current-buffer other
+                (setq ghostel-tmux--initialized t))
+              (puthash 6 other ghostel-tmux--panes)
+              (puthash 0 (list :name "w" :panes (list 5 6))
+                       ghostel-tmux--windows)
+              (ghostel-tmux--on-layout-change 0 "aaaa,80x24,0,0,6")
+              (should (equal (plist-get (gethash 0 ghostel-tmux--windows) :panes)
+                             '(6)))
+              (should (eq (gethash 5 ghostel-tmux--panes) pane))
+              (should (buffer-live-p pane)))
+          (kill-buffer other))))))
+
+(ert-deftest ghostel-tmux-test-window-close-keeps-window-on-failed-query ()
+  "A failed query says nothing about the window."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-window-pane ctl pane
+          (ghostel-tmux-test--feed ctl "%window-close @0\r\n")
+          (ghostel-tmux--pump-deferred ctl)
+          (ghostel-tmux-test--feed ctl "%begin 1 1 1\r\n%error 1 1 1\r\n")
+          (should (buffer-live-p pane)))))))
+
+(ert-deftest ghostel-tmux-test-window-close-ignores-unknown-window ()
+  "A window of another session costs no query."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--feed ctl "%window-close @9\r\n")
+        (ghostel-tmux--pump-deferred ctl)
+        (should-not sent)))))
+
+(ert-deftest ghostel-tmux-test-unlinked-window-close-drops-at-once ()
+  "`%unlinked-window-close' means the session no longer holds the window."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-window-pane ctl pane
+          (ghostel-tmux-test--feed ctl "%unlinked-window-close @0\r\n")
+          (ghostel-tmux--pump-deferred ctl)
+          (should-not sent)
+          (should-not (gethash 0 ghostel-tmux--windows))
+          (should-not (buffer-live-p pane)))))))
 
 (ert-deftest ghostel-tmux-test-layout-change-tolerates-empty-raw-flags ()
   ;; A window with no printable flags makes `#{window_raw_flags}'
@@ -1586,6 +1659,126 @@ SENT collects the sent lines, newest first."
 (defconst ghostel-tmux-test--zoom-query
   "display-message -p -t %5 '#{window_zoomed_flag}'\n"
   "The line that reads the zoom flag of the window of pane %5.")
+
+(defmacro ghostel-tmux-test--with-shown-pane (ctl pane &rest body)
+  "Run BODY in controller CTL with %5, in PANE, shown and active in window @0."
+  (declare (indent 2))
+  `(let ((,pane (generate-new-buffer "*ghostel-tmux:s:w%5*")))
+     (unwind-protect
+         (save-window-excursion
+           (set-window-buffer (selected-window) ,pane)
+           (with-current-buffer ,ctl
+             (puthash 5 ,pane ghostel-tmux--panes)
+             (setq ghostel-tmux--current-window-id 0
+                   ghostel-tmux--active-pane-id 5)
+             ,@body))
+       (kill-buffer ,pane))))
+
+(ert-deftest ghostel-tmux-test-rezoom-shown-pane-when-unzoomed ()
+  "An unzoomed window of the pane shown is zoomed again."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-shown-pane ctl _pane
+          (ghostel-tmux--rezoom-shown-pane 0 "*")
+          (should (equal sent (list ghostel-tmux-test--zoom-query))))))))
+
+(ert-deftest ghostel-tmux-test-rezoom-skips-zoomed-window ()
+  "A window zoomed already costs no query."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-shown-pane ctl _pane
+          (ghostel-tmux--rezoom-shown-pane 0 "*Z")
+          (should-not sent))))))
+
+(ert-deftest ghostel-tmux-test-rezoom-skips-other-windows ()
+  "Only the current window of the session is zoomed."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-shown-pane ctl _pane
+          (setq ghostel-tmux--current-window-id 1)
+          (ghostel-tmux--rezoom-shown-pane 0 "*")
+          (should-not sent))))))
+
+(ert-deftest ghostel-tmux-test-rezoom-skips-hidden-pane ()
+  "A pane no window shows needs no zoom."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-shown-pane ctl _pane
+          (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+          (ghostel-tmux--rezoom-shown-pane 0 "*")
+          (should-not sent))))))
+
+(ert-deftest ghostel-tmux-test-rezoom-skips-pane-of-another-window ()
+  "A pane on its way into the window, which it does not list yet, waits."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-shown-pane ctl _pane
+          (puthash 0 (list :name "w" :panes (list 6 7)) ghostel-tmux--windows)
+          (ghostel-tmux--rezoom-shown-pane 0 "*")
+          (should-not sent))))))
+
+(ert-deftest ghostel-tmux-test-layout-change-rezooms-shown-pane ()
+  "A layout without the zoom flag zooms the pane shown, one with it does not."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil)
+          (layout "aaaa,80x24,0,0[80x12,0,0,5,80x11,0,13,6]")
+          (other (generate-new-buffer "*ghostel-tmux:s:w%6*")))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-shown-pane ctl pane
+          (unwind-protect
+              (progn
+                (puthash 6 other ghostel-tmux--panes)
+                (dolist (buf (list pane other))
+                  (with-current-buffer buf
+                    (setq ghostel-tmux--initialized t)))
+                (ghostel-tmux-test--feed
+                 ctl (format "%%layout-change @0 %s bbbb,80x24,0,0,5 *Z\r\n" layout))
+                (ghostel-tmux--pump-deferred ctl)
+                (should-not sent)
+                (ghostel-tmux-test--feed
+                 ctl (format "%%layout-change @0 %s %s *\r\n" layout layout))
+                (ghostel-tmux--pump-deferred ctl)
+                (should (equal sent (list ghostel-tmux-test--zoom-query))))
+            (kill-buffer other)))))))
+
+(ert-deftest ghostel-tmux-test-reported-pane-replaces-pending-rezoom ()
+  "A selection tmux reports stands, also for a pane another window shows.
+tmux sends the layout that unzooms before the report of the selection."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (other (generate-new-buffer "*ghostel-tmux:s:w%6*")))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--with-shown-pane ctl _pane
+          (unwind-protect
+              (progn
+                (set-window-buffer (split-window) other)
+                (puthash 6 other ghostel-tmux--panes)
+                (ghostel-tmux--rezoom-shown-pane 0 "*")
+                (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+                (ghostel-tmux-test--reply ctl "0\r\n")
+                (should (equal (car sent)
+                               "display-message -p -t %6 '#{window_zoomed_flag}'\n"))
+                (ghostel-tmux-test--reply ctl "0\r\n")
+                (should (equal (car sent) "resize-pane -Z -t %6\n"))
+                (should-not (member "resize-pane -Z -t %5\n" sent)))
+            (kill-buffer other)))))))
+
+(ert-deftest ghostel-tmux-test-layout-change-passes-flags ()
+  "The flags field of `%layout-change' reaches the handler."
+  (let (seen)
+    (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
+               (lambda (_wid _layout visible flags)
+                 (setq seen (list visible flags)))))
+      (ghostel-tmux--dispatch-notification
+       "%layout-change @4 b33d,80x24,0,0,0 a,b *Z")
+      (should (equal seen '("a,b" "*Z")))
+      (ghostel-tmux--dispatch-notification
+       "%layout-change @4 b33d,80x24,0,0,0 a,b ")
+      (should (equal seen '("a,b" ""))))))
 
 (ert-deftest ghostel-tmux-test-ensure-pane-zoomed-zooms-unzoomed-window ()
   ;; The flag is read from the pane's own window, so a pane shown from
