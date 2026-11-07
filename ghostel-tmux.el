@@ -5,7 +5,7 @@
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/ghostel-tmux
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.61.0"))
+;; Package-Requires: ((emacs "28.1") (ghostel "0.62.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -45,8 +45,6 @@
 
 (declare-function ghostel--write-vt "ghostel-module" (term data))
 (declare-function ghostel--write-pty "ghostel-module" (term data))
-
-(defvar ghostel-control-mode-function)
 
 
 ;; Customization
@@ -1768,10 +1766,6 @@ The shell's buffer hides itself while tmux is attached and comes back
 when tmux detaches."
   :global t
   :group 'ghostel-tmux
-  (when (and ghostel-tmux-takeover-mode
-             (not (boundp 'ghostel-control-mode-function)))
-    (setq ghostel-tmux-takeover-mode nil)
-    (user-error "This ghostel has no `ghostel-control-mode-function'"))
   (setq ghostel-control-mode-function
         (and ghostel-tmux-takeover-mode #'ghostel-tmux--control)))
 

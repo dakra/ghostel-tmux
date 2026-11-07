@@ -11,9 +11,7 @@ tab line.
 * Requirements
 
 - tmux 3.0 or later.
-- [[https://github.com/dakra/ghostel][Ghostel]] 0.61.0 or later, with its native module.
-- For =ghostel-tmux-takeover-mode=, a ghostel that has
-  =ghostel-control-mode-function=.
+- [[https://github.com/dakra/ghostel][Ghostel]] 0.62.0 or later, with its native module.
 
 * Commands
 
