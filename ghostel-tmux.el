@@ -957,7 +957,8 @@ deferred follow — `--on-layout-change' picks it up."
                          (not (eql ghostel--term-rows h))))
             (ghostel--set-size-with-cell-dims ghostel--term h w)
             (setq ghostel--term-cols w
-                  ghostel--term-rows h))
+                  ghostel--term-rows h)
+            (ghostel-tmux--commit-hidden-resize))
           (unless (or ghostel-tmux--initialized
                       ghostel-tmux--bootstrap-pending)
             (setq ghostel-tmux--bootstrap-pending t)
@@ -1488,17 +1489,35 @@ window-renamed, window-close, sentinel)."
 
 ;; Sizing
 
+(defun ghostel-tmux--commit-hidden-resize ()
+  "Commit a resize of this pane, which no window shows.
+The terminal commits a resize on its next redraw and clears the prompt
+row then; that redraw would clear the prompt the shell repaints after
+tmux has resized the pane.  This render has no window of the pane and
+loses glyph sizing, so showing the pane repaints it in full.  A pane in
+copy or line mode cannot be rendered directly and keeps the resize
+pending."
+  (unless (memq ghostel--input-mode '(copy line))
+    (ghostel--commit-frame (current-buffer))
+    (setq ghostel--repair-pending t
+          ghostel--pending-redraw t)))
+
 (defun ghostel-tmux--resize-pane (rows cols)
   "Resize this pane's terminal to ROWS by COLS and report the size to tmux.
-The pane's `ghostel-resize-function'."
-  (ghostel--set-size-with-cell-dims ghostel--term rows cols)
-  (setq ghostel--term-rows rows
-        ghostel--term-cols cols
-        ghostel--force-next-redraw t)
-  ;; The terminal commits a resize on its next redraw and clears the
-  ;; prompt row then.  Commit now: after tmux has resized the pane, that
-  ;; would clear the prompt the shell has just repainted.
-  (ghostel--redraw-now (current-buffer))
+The pane's `ghostel-resize-function'.  An unchanged grid still passes
+through, for the cell pixel size and the report: tmux's client size may
+be that of another pane's window."
+  (let ((same-size (and (eql rows ghostel--term-rows)
+                        (eql cols ghostel--term-cols))))
+    (ghostel--set-size-with-cell-dims ghostel--term rows cols)
+    (setq ghostel--term-rows rows
+          ghostel--term-cols cols)
+    ;; The terminal commits a resize on its next redraw and clears the
+    ;; prompt row then.  Commit now: after tmux has resized the pane, that
+    ;; would clear the prompt the shell has just repainted.
+    (if same-size
+        (ghostel--invalidate)
+      (ghostel--redraw-now (current-buffer) t)))
   (let ((controller ghostel-tmux--controller-buffer))
     (when (buffer-live-p controller)
       (with-current-buffer controller

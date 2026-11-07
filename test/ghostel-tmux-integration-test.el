@@ -161,6 +161,32 @@ SPEC is (BUFFER TERM)."
       (ghostel--redraw-now pane)
       (should (string-match-p "PROMPT>" (ghostel--copy-all-text term))))))
 
+(ert-deftest ghostel-tmux-integration-hidden-pane-keeps-repainted-prompt ()
+  "A prompt repainted after a layout change survives showing the hidden pane."
+  :tags '(native)
+  (let ((ctl (generate-new-buffer " *ghostel-tmux-int-ctl*"))
+        (prompt "\e]133;A\e\\PROMPT> \e]133;B\e\\")
+        pane)
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer ctl
+            (ghostel-tmux-control-mode))
+          (setq pane (ghostel-tmux--get-or-create-pane ctl 1 0 "w"))
+          (with-current-buffer pane
+            (ghostel--write-vt ghostel--term (concat "output\r\n" prompt)))
+          (with-current-buffer ctl
+            (ghostel-tmux--on-layout-change 0 "bd5b,100x30,0,0,1"))
+          (with-current-buffer pane
+            ;; tmux resized the pane and the shell repainted its prompt.
+            (ghostel--write-vt ghostel--term (concat "\r\e[K" prompt))
+            (set-window-buffer (selected-window) pane)
+            (ghostel-tmux--resize-pane 30 100)
+            (ghostel--redraw-now pane)
+            (should (string-match-p "PROMPT>"
+                                    (ghostel--copy-all-text ghostel--term)))))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (kill-buffer ctl))))
+
 (ert-deftest ghostel-tmux-integration-sealed-pane-reports-no-focus ()
   "A sealed pane whose program asked for focus reports sends none."
   :tags '(native)

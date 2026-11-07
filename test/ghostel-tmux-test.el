@@ -775,6 +775,7 @@
           (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
                      (lambda (_term rows cols)
                        (push (cons cols rows) sizes)))
+                    ((symbol-function 'ghostel--commit-frame) #'ignore)
                     ;; Pretend pane %0 is not visible in any window
                     ;; (tests run in batch mode without windows).
                     ((symbol-function 'get-buffer-window-list)
@@ -817,6 +818,7 @@
       (unwind-protect
           (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
                      (lambda (_t rows cols) (push (cons cols rows) sizes)))
+                   ((symbol-function 'ghostel--commit-frame) #'ignore)
                     ((symbol-function 'get-buffer-window-list)
                      (lambda (buf &rest _)
                        (when (eq buf visible-pane) '(fake-window))))
@@ -975,6 +977,7 @@
                                    b)))))
                     ((symbol-function 'ghostel--set-size-with-cell-dims)
                      (lambda (&rest _) nil))
+                   ((symbol-function 'ghostel--commit-frame) #'ignore)
                     ((symbol-function 'get-buffer-window-list)
                      (lambda (&rest _) nil))
                     ((symbol-function 'ghostel-tmux--follow-active-pane)
@@ -2203,13 +2206,63 @@ SPEC is (FOLLOWED): that variable collects followed panes."
           (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
                      (lambda (&rest _) (push 'resize events)))
                     ((symbol-function 'ghostel--redraw-now)
-                     (lambda (&rest _) (push 'redraw events)))
+                     (lambda (_buffer force)
+                       (should force)
+                       (push 'redraw events)))
                     ((symbol-function 'process-live-p) (lambda (_) t))
                     ((symbol-function 'process-send-string)
                      (lambda (&rest _) (push 'report events))))
             (ghostel-tmux--resize-pane 40 120))
           (should (equal (nreverse events) '(resize redraw report))))
       (kill-buffer ctl))))
+
+(ert-deftest ghostel-tmux-test-resize-pane-same-size-does-not-force ()
+  ;; Every display of a pane comes here.  A forced redraw would break
+  ;; through a frame the program holds with mode 2026; the size still
+  ;; goes through, as a font change can keep the grid but not the cells.
+  (let ((ctl (generate-new-buffer "*ghostel-tmux:same-ctl%0*"))
+        (events nil))
+    (unwind-protect
+        (with-temp-buffer
+          (with-current-buffer ctl
+            (setq-local ghostel-tmux--controller-process 'fake-proc))
+          (setq-local ghostel-tmux--controller-buffer ctl
+                      ghostel--term 'fake-term
+                      ghostel--term-rows 40
+                      ghostel--term-cols 120)
+          (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
+                     (lambda (&rest _) (push 'resize events)))
+                    ((symbol-function 'ghostel--redraw-now)
+                     (lambda (&rest _) (push 'redraw events)))
+                    ((symbol-function 'ghostel--invalidate)
+                     (lambda () (push 'invalidate events)))
+                    ((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'process-send-string)
+                     (lambda (&rest _) (push 'report events))))
+            (ghostel-tmux--resize-pane 40 120))
+          (should (equal (nreverse events) '(resize invalidate report))))
+      (kill-buffer ctl))))
+
+(ert-deftest ghostel-tmux-test-hidden-resize-repairs-on-display ()
+  ;; The commit renders without a window of the pane.
+  (with-temp-buffer
+    (let ((committed nil))
+      (cl-letf (((symbol-function 'ghostel--commit-frame)
+                 (lambda (buf) (setq committed buf))))
+        (ghostel-tmux--commit-hidden-resize))
+      (should (eq committed (current-buffer)))
+      (should ghostel--repair-pending)
+      (should ghostel--pending-redraw))))
+
+(ert-deftest ghostel-tmux-test-hidden-resize-leaves-copy-and-line-mode ()
+  ;; A direct render paints over a frozen view and loses line-mode input.
+  (dolist (mode '(copy line))
+    (with-temp-buffer
+      (setq-local ghostel--input-mode mode)
+      (cl-letf (((symbol-function 'ghostel--commit-frame)
+                 (lambda (_) (error "Rendered directly"))))
+        (ghostel-tmux--commit-hidden-resize))
+      (should-not ghostel--repair-pending))))
 
 (ert-deftest ghostel-tmux-test-capture-feeds-rows-with-cr ()
   ;; capture-pane separates rows with a bare LF, which the VT engine
