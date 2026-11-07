@@ -492,7 +492,8 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-control-dispatches-events ()
   (ghostel-tmux-test--with-host host
-    (let (calls)
+    (let ((ghostel-tmux-takeover-mode t)
+          calls)
       (cl-letf (((symbol-function 'ghostel-tmux--dcs-enter)
                  (lambda () (push 'enter calls) t))
                 ((symbol-function 'ghostel-tmux--dcs-data)
@@ -510,7 +511,38 @@ fills its output queue between the two repeats the CR."
     (ghostel-tmux-takeover-mode 1)
     (should (eq #'ghostel-tmux--control ghostel-control-mode-function))
     (ghostel-tmux-takeover-mode -1)
-    (should-not ghostel-control-mode-function)))
+    (should (eq #'ghostel-tmux--control ghostel-control-mode-function))))
+
+(ert-deftest ghostel-tmux-test-unload-removes-the-control-function ()
+  (let ((ghostel-control-mode-function #'ghostel-tmux--control))
+    (should-not (ghostel-tmux-unload-function))
+    (should-not ghostel-control-mode-function))
+  (let ((ghostel-control-mode-function #'ignore))
+    (ghostel-tmux-unload-function)
+    (should (eq #'ignore ghostel-control-mode-function))))
+
+(ert-deftest ghostel-tmux-test-takeover-mode-off-declines-new-frames ()
+  (ghostel-tmux-test--with-host host
+    (let ((ghostel-tmux-takeover-mode nil)
+          (original (buffer-name host)))
+      (ghostel-tmux--control 'enter nil)
+      (should-not ghostel-tmux--dcs-active)
+      (should (equal original (buffer-name host))))))
+
+(ert-deftest ghostel-tmux-test-takeover-mode-off-keeps-running-session ()
+  (ghostel-tmux-test--with-host host
+    (let ((ghostel-control-mode-function nil)
+          (ghostel-tmux-takeover-mode nil)
+          (original (buffer-name host)))
+      (ghostel-tmux-takeover-mode 1)
+      (funcall ghostel-control-mode-function 'enter nil)
+      (should ghostel-tmux--dcs-active)
+      (ghostel-tmux-takeover-mode -1)
+      (funcall ghostel-control-mode-function 'data "%exit\n")
+      (should ghostel-tmux--closing)
+      (funcall ghostel-control-mode-function 'exit nil)
+      (should-not ghostel-tmux--dcs-active)
+      (should (equal original (buffer-name host))))))
 
 (ert-deftest ghostel-tmux-test-dcs-data-routes-to-parser ()
   (ghostel-tmux-test--with-host host

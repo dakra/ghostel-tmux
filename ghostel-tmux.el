@@ -1746,12 +1746,25 @@ be that of another pane's window."
 ;; (start: `\\eP1000p', end: `\\e\\\\') opens, with its body bytes once
 ;; per input chunk, and when it closes.
 
+;;;###autoload
+(define-minor-mode ghostel-tmux-takeover-mode
+  "Turn `tmux -CC' typed in a ghostel shell into pane buffers.
+The shell's buffer hides itself while tmux is attached and comes back
+when tmux detaches.  Turning the mode off stops new takeovers; a session
+already attached keeps running until tmux detaches."
+  :global t
+  :group 'ghostel-tmux
+  (when ghostel-tmux-takeover-mode
+    (setq ghostel-control-mode-function #'ghostel-tmux--control)))
+
 (defun ghostel-tmux--control (event data)
   "Handle control-mode EVENT with DATA in the current terminal buffer.
-The `ghostel-control-mode-function' of `ghostel-tmux-takeover-mode'."
+The `ghostel-control-mode-function' of `ghostel-tmux-takeover-mode'.
+It stays installed when the mode is off, as a running session needs its
+frame's data and exit."
   (pcase event
     ('enter
-     (unless (ghostel-tmux--dcs-enter)
+     (when (and ghostel-tmux-takeover-mode (not (ghostel-tmux--dcs-enter)))
        (message (concat "Ghostel-tmux: Ignoring tmux control-mode output in %s; "
                         "it stays hidden until tmux detaches "
                         "(M-x ghostel-tmux-reset to force)")
@@ -1759,15 +1772,11 @@ The `ghostel-control-mode-function' of `ghostel-tmux-takeover-mode'."
     ('data (ghostel-tmux--dcs-data data))
     ('exit (ghostel-tmux--dcs-exit))))
 
-;;;###autoload
-(define-minor-mode ghostel-tmux-takeover-mode
-  "Turn `tmux -CC' typed in a ghostel shell into pane buffers.
-The shell's buffer hides itself while tmux is attached and comes back
-when tmux detaches."
-  :global t
-  :group 'ghostel-tmux
-  (setq ghostel-control-mode-function
-        (and ghostel-tmux-takeover-mode #'ghostel-tmux--control)))
+(defun ghostel-tmux-unload-function ()
+  "Stop ghostel calling `ghostel-tmux--control' before this file unloads."
+  (when (eq ghostel-control-mode-function #'ghostel-tmux--control)
+    (setq ghostel-control-mode-function nil))
+  nil)
 
 (defun ghostel-tmux--dcs-enter ()
   "Handle a tmux control-mode DCS opening in the current buffer.
