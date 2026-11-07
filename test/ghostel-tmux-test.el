@@ -247,7 +247,7 @@ fills its output queue between the two repeats the CR."
       (setq ghostel-tmux--command-in-flight
             (cons "display-message" (lambda (out) (setq received out))))
       (ghostel-tmux-test--feed
-       ctl "%begin 1 7 0\r\nhello world\r\n%end 1 7 0\r\n")
+       ctl "%begin 1 7 1\r\nhello world\r\n%end 1 7 1\r\n")
       (should (equal received "hello world"))
       (should (eq ghostel-tmux--parser-state 'idle))
       (should (null ghostel-tmux--command-in-flight)))))
@@ -260,7 +260,7 @@ fills its output queue between the two repeats the CR."
             (cons "bad" (lambda (out)
                           (setq called t received out))))
       (ghostel-tmux-test--feed
-       ctl "%begin 1 7 0\r\nbad cmd\r\n%error 1 7 0\r\n")
+       ctl "%begin 1 7 1\r\nbad cmd\r\n%error 1 7 1\r\n")
       (should called)
       (should (null received)))))
 
@@ -275,10 +275,10 @@ fills its output queue between the two repeats the CR."
       (ghostel-tmux-test--feed
        ctl
        (concat
-        "%begin 1 9 0\r\n"
+        "%begin 1 9 1\r\n"
         "%end notatag\r\n"          ; non-numeric — payload
         "real line\r\n"
-        "%end 1 9 0\r\n"))
+        "%end 1 9 1\r\n"))
       (should (equal received "%end notatag\nreal line")))))
 
 (ert-deftest ghostel-tmux-test-parser-block-forged-end-is-payload ()
@@ -293,10 +293,10 @@ fills its output queue between the two repeats the CR."
       (ghostel-tmux-test--feed
        ctl
        (concat
-        "%begin 1622 17 0\r\n"
+        "%begin 1622 17 1\r\n"
         "%end 99 99 0\r\n"           ; forged — wrong TIME/CMD
         "real line\r\n"
-        "%end 1622 17 0\r\n"))
+        "%end 1622 17 1\r\n"))
       (should (equal received "%end 99 99 0\nreal line"))
       (should (eq ghostel-tmux--parser-state 'idle)))))
 
@@ -394,7 +394,7 @@ fills its output queue between the two repeats the CR."
                 ((symbol-function 'run-at-time)
                  (lambda (_time _repeat fn &rest args)
                    (push (cons fn args) timers))))
-        (ghostel-tmux-test--feed ctl "%begin 1 1 0\r\n%end 1 1 0\r\n")
+        (ghostel-tmux-test--feed ctl "%begin 1 1 1\r\n%end 1 1 1\r\n")
         ;; Nothing sent synchronously; a deferred pump was scheduled.
         (should (null sent))
         (should (= 1 (length timers)))
@@ -674,6 +674,7 @@ fills its output queue between the two repeats the CR."
             (with-current-buffer pane
               (setq ghostel-tmux--window-id 0))
             (puthash 5 pane ghostel-tmux--panes)
+            (puthash 0 (list :panes (list 5)) ghostel-tmux--windows)
             (setq ghostel-tmux--window-order '(0))
             (cl-letf (((symbol-function 'completing-read)
                        (lambda (_prompt table &rest _)
@@ -709,6 +710,7 @@ fills its output queue between the two repeats the CR."
             (with-current-buffer pane
               (setq-local ghostel-tmux--window-id 0))
             (puthash 0 pane ghostel-tmux--panes)
+            (puthash 0 (list :panes (list 0)) ghostel-tmux--windows)
             (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
                        #'ignore))
               (ghostel-tmux--receive-window-rows
@@ -1771,7 +1773,9 @@ tmux resizes that screen when the pane leaves the alternate one."
               ((symbol-function 'ghostel-tmux--on-window-renamed)
                (lambda (_wid n) (push n seen))))
       (ghostel-tmux--dispatch-notification (concat "%session-changed $1 " name))
-      (ghostel-tmux--dispatch-notification (concat "%session-renamed " name))
+      (let ((ghostel-tmux--session-id 1))
+        (ghostel-tmux--dispatch-notification
+         (concat "%session-renamed $1 " name)))
       (ghostel-tmux--dispatch-notification (concat "%window-renamed @1 " name)))
     (should (equal seen (list text text text)))
     (should (equal (nth 3 (ghostel-tmux--parse-window-row
@@ -2293,6 +2297,143 @@ tmux resizes that screen when the pane leaves the alternate one."
           (setq input "a\n\n  \nb")
           (ghostel-tmux--prefix-cmd)
           (should (string-prefix-p "a\nb\ndisplay-message" (car sent))))))))
+
+(ert-deftest ghostel-tmux-test-block-of-tmux-is-no-reply ()
+  "A block with flags 0, such as a hook's, leaves the command in flight."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (got :none))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux--queue-command "x" (lambda (out) (setq got out)))
+        (ghostel-tmux-test--feed ctl "%begin 1 1 0\r\nhook\r\n%end 1 1 0\r\n")
+        (should (eq got :none))
+        (should ghostel-tmux--command-in-flight)
+        (ghostel-tmux-test--feed ctl "%begin 1 2 1\r\nreply\r\n%end 1 2 1\r\n")
+        (should (equal got "reply"))))))
+
+(ert-deftest ghostel-tmux-test-pane-list-follows-the-layout ()
+  "Panes of a window come in layout order, once each, live ones only."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((a (generate-new-buffer " a")) (b (generate-new-buffer " b"))
+          (dead (generate-new-buffer " dead")))
+      (kill-buffer dead)
+      (unwind-protect
+          (progn
+            (puthash 1 a ghostel-tmux--panes)
+            (puthash 2 b ghostel-tmux--panes)
+            (puthash 3 dead ghostel-tmux--panes)
+            (puthash 0 (list :panes (list 2 3 1)) ghostel-tmux--windows)
+            (puthash 7 (list :panes (list 1)) ghostel-tmux--windows)
+            (setq ghostel-tmux--window-order (list 0 7))
+            (should (equal (ghostel-tmux--pane-list ctl) (list b a)))
+            (should (equal ghostel-tmux--window-order '(0 7)))
+            (should (equal (plist-get (gethash 0 ghostel-tmux--windows) :panes)
+                           '(2 3 1))))
+        (kill-buffer a)
+        (kill-buffer b)))))
+
+(ert-deftest ghostel-tmux-test-killed-pane-buffer-comes-back ()
+  "Tmux still has the pane of a buffer the user killed: ask for it again."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (pane (generate-new-buffer "*pane*")))
+      (ghostel-tmux-test--with-wire ctl sent
+        (with-current-buffer pane
+          (ghostel-tmux-pane-mode 1)
+          (setq ghostel-tmux--controller-buffer ctl
+                ghostel-tmux--pane-id 5))
+        (puthash 5 pane ghostel-tmux--panes)
+        (kill-buffer pane)
+        (should-not (gethash 5 ghostel-tmux--panes))
+        (should (string-prefix-p "list-windows" (car sent)))))))
+
+(ert-deftest ghostel-tmux-test-removed-pane-does-not-come-back ()
+  "A pane tmux removed costs no query."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (pane (generate-new-buffer "*pane*")))
+      (ghostel-tmux-test--with-wire ctl sent
+        (with-current-buffer pane
+          (ghostel-tmux-pane-mode 1)
+          (setq ghostel-tmux--controller-buffer ctl
+                ghostel-tmux--pane-id 5))
+        (puthash 5 pane ghostel-tmux--panes)
+        (ghostel-tmux--remove-pane ctl 5)
+        (should-not sent)))))
+
+(ert-deftest ghostel-tmux-test-sentinel-names-a-detach ()
+  "A process killed by `ghostel-tmux-detach' is no failure; other ends are told."
+  (pcase-dolist (`(,closing ,event ,expected)
+                 '((t "killed: 9\n" "Ghostel-tmux: Detached")
+                   (nil "killed: 9\n" "Ghostel-tmux: killed: 9")
+                   (t "finished\n" "Ghostel-tmux: finished")))
+    (let ((ctl (generate-new-buffer " *ghostel-tmux-test-ctl*"))
+          (messages nil))
+      (unwind-protect
+          (progn
+            (with-current-buffer ctl
+              (ghostel-tmux-control-mode)
+              (setq ghostel-tmux--closing closing))
+            (cl-letf (((symbol-function 'process-buffer) (lambda (_p) ctl))
+                      ((symbol-function 'process-live-p) (lambda (_p) nil))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args)
+                         (push (apply #'format fmt args) messages))))
+              (ghostel-tmux--sentinel 'fake-proc event))
+            (should (equal (car messages) expected)))
+        (when (buffer-live-p ctl) (kill-buffer ctl))))))
+
+(ert-deftest ghostel-tmux-test-frame-cut-short-makes-tmux-leave ()
+  "A frame ending without `%exit' is followed by an empty line; a normal one not."
+  (let ((written nil) (live t))
+    (cl-letf (((symbol-function 'ghostel-tmux--exit-control-mode) #'ignore)
+              ((symbol-function 'process-live-p) (lambda (_p) live))
+              ((symbol-function 'ghostel--write-pty)
+               (lambda (_term data) (push data written))))
+      (with-temp-buffer
+        (setq-local ghostel--term 'fake)
+        (setq ghostel-tmux--dcs-active t)
+        (ghostel-tmux--dcs-exit)
+        (should (equal written '("\n"))))
+      (setq written nil)
+      (with-temp-buffer
+        (setq-local ghostel--term 'fake)
+        (setq ghostel-tmux--dcs-active t
+              ghostel-tmux--closing t)
+        (ghostel-tmux--dcs-exit)
+        (should-not written))
+      ;; The host shell is gone: there is nobody to write to.
+      (setq live nil)
+      (with-temp-buffer
+        (setq-local ghostel--term 'fake)
+        (setq ghostel-tmux--dcs-active t)
+        (ghostel-tmux--dcs-exit)
+        (should-not written)))))
+
+(ert-deftest ghostel-tmux-test-second-backfill-is-dropped ()
+  "A pane killed with its backfill queued gets two; only the first counts."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer " pane")) (written nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel--write-vt)
+                     (lambda (_term data) (push data written)))
+                    ((symbol-function 'ghostel--invalidate) #'ignore))
+            (puthash 5 pane ghostel-tmux--panes)
+            (with-current-buffer pane
+              (setq-local ghostel--term 'fake)
+              (setq-local ghostel--term-rows 24))
+            (ghostel-tmux--receive-pane-backfill ctl 5 nil nil "one" nil)
+            (ghostel-tmux--receive-pane-backfill ctl 5 nil nil "two" nil)
+            (should (= (length written) 1)))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-followed-pane-keeps-the-buffer-order ()
+  "Showing a pane tmux switched to is no visit: `other-buffer' stays."
+  (let ((pane (generate-new-buffer " pane")))
+    (unwind-protect
+        (save-window-excursion
+          (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size) #'ignore))
+            (ghostel-tmux--display-pane-in-window pane (selected-window)))
+          (should (eq (window-buffer) pane))
+          (should-not (eq (car (buffer-list)) pane)))
+      (kill-buffer pane))))
 
 (ert-deftest ghostel-tmux-test-cmd-routes-through-queue ()
   ;; `--cmd' must use the command queue so tmux replies come back
@@ -3123,10 +3264,10 @@ SPEC is (FOLLOWED): that variable collects followed panes."
           ;; Completing each reply block releases the next chunk.
           (setq ghostel-tmux--parser-state 'idle)
           (ghostel-tmux-test--feed
-           ctl "%begin 1 1 0\r\n%end 1 1 0\r\n")
+           ctl "%begin 1 1 1\r\n%end 1 1 1\r\n")
           (ghostel-tmux--pump-command-queue)
           (ghostel-tmux-test--feed
-           ctl "%begin 1 2 0\r\n%end 1 2 0\r\n")
+           ctl "%begin 1 2 1\r\n%end 1 2 1\r\n")
           (ghostel-tmux--pump-command-queue)))
       (should (= (length sent) 3))
       (dolist (cmd sent)

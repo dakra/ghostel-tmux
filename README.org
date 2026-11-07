@@ -10,7 +10,7 @@ tab line.
 
 * Requirements
 
-- tmux.
+- tmux 3.0 or later.
 - [[https://github.com/dakra/ghostel][Ghostel]] 0.61.0 or later, with its native module.
 - For =ghostel-tmux-takeover-mode=, a ghostel that has
   =ghostel-control-mode-function=.
@@ -53,6 +53,10 @@ mode open until the shell prints an escape sequence, which most prompts
 do.  With a plain prompt such as macOS's =/bin/bash=, run
 =M-x ghostel-tmux-reset= and press =C-l=.
 
+A raw escape sequence in tmux's output, such as =run-shell= printing colors
+from =C-t :=, ends control mode as well: tmux is told to leave, the panes
+become snapshots, and the shell shows the end of the control-mode stream.
+
 With the mode off, =tmux -CC= in a ghostel shell shows nothing until tmux
 exits, as in any terminal without control-mode support.
 
@@ -60,8 +64,8 @@ exits, as in any terminal without control-mode support.
 
 =shell/= has an optional =tmux= wrapper for bash, zsh, fish and nushell that
 adds =-CC= to the subcommands that attach (=tmux new=, =tmux attach=, =tmux a=,
-or bare =tmux=) and passes everything else through.  Source it in ghostel
-only:
+or bare =tmux=) and passes everything else through, also =tmux new -d=, which
+has no client to take over.  Source it in ghostel only:
 
 #+begin_src sh
 # bash; for zsh use ghostel-tmux.zsh

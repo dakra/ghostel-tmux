@@ -45,14 +45,14 @@ echo "ghostel-tmux shell wrapper tests"
 echo
 
 # Bare and attaching subcommands → -CC injected.
-run_one "bare tmux"                 "-CC"                       ""
-run_one "tmux new"                  "-CC new"                   "new"
-run_one "tmux new -s foo"           "-CC new -s foo"            "new -s foo"
-run_one "tmux attach"               "-CC attach"                "attach"
-run_one "tmux attach -t foo"        "-CC attach -t foo"         "attach -t foo"
-run_one "tmux a -t bar"             "-CC a -t bar"              "a -t bar"
-run_one "tmux new-session -A -s x"  "-CC new-session -A -s x"   "new-session -A -s x"
-run_one "tmux attach-session"       "-CC attach-session"        "attach-session"
+run_one "bare tmux"                 "-u -CC"                       ""
+run_one "tmux new"                  "-u -CC new"                   "new"
+run_one "tmux new -s foo"           "-u -CC new -s foo"            "new -s foo"
+run_one "tmux attach"               "-u -CC attach"                "attach"
+run_one "tmux attach -t foo"        "-u -CC attach -t foo"         "attach -t foo"
+run_one "tmux a -t bar"             "-u -CC a -t bar"              "a -t bar"
+run_one "tmux new-session -A -s x"  "-u -CC new-session -A -s x"   "new-session -A -s x"
+run_one "tmux attach-session"       "-u -CC attach-session"        "attach-session"
 
 # Already has -CC or -C → don't double up.
 run_one "tmux -CC new"              "-CC new"                   "-CC new"
@@ -65,14 +65,14 @@ run_one "tmux capture-pane -p"      "capture-pane -p"           "capture-pane -p
 run_one "tmux source-file foo"      "source-file foo"           "source-file foo"
 
 # Flags-with-values: -L socket, -S path, -c cmd, -f file, -T features.
-run_one "tmux -L sock new"          "-CC -L sock new"           "-L sock new"
-run_one "tmux -S /tmp/x new -s y"   "-CC -S /tmp/x new -s y"    "-S /tmp/x new -s y"
+run_one "tmux -L sock new"          "-u -CC -L sock new"           "-L sock new"
+run_one "tmux -S /tmp/x new -s y"   "-u -CC -S /tmp/x new -s y"    "-S /tmp/x new -s y"
 run_one "tmux -L sock ls"           "-L sock ls"                "-L sock ls"
-run_one "tmux -f cfg new"           "-CC -f cfg new"            "-f cfg new"
-run_one "tmux -T 256 new"           "-CC -T 256 new"            "-T 256 new"
+run_one "tmux -f cfg new"           "-u -CC -f cfg new"            "-f cfg new"
+run_one "tmux -T 256 new"           "-u -CC -T 256 new"            "-T 256 new"
 
 # Boolean global flags (-N takes no value) must not eat the subcommand.
-run_one "tmux -N new"               "-CC -N new"                "-N new"
+run_one "tmux -N new"               "-u -CC -N new"                "-N new"
 run_one "tmux -N ls"                "-N ls"                     "-N ls"
 
 # Bypass via `command tmux'
@@ -87,6 +87,72 @@ else
     printf '  FAIL  %s\n        got: %q\n' \
         "command tmux new bypasses wrapper" "$got_bypass"
     FAIL=$((FAIL + 1))
+fi
+
+# A session started detached has no client to take over.  One row per
+# case, `|' between what to type and what tmux should get; each shell
+# below runs them all.
+DETACHED_CASES=(
+    "new -d|new -d"
+    "new -d -s foo|new -d -s foo"
+    "new-session -ds foo|new-session -ds foo"
+    "new -dP|new -dP"
+    "new -Pd|new -Pd"
+    "-L sock new -d|-L sock new -d"
+    "new -s d|-u -CC new -s d"
+    "new -s -d|-u -CC new -s -d"
+    "new -n dev|-u -CC new -n dev"
+    "new -e FOO=d|-u -CC new -e FOO=d"
+    "new -Asdev|-u -CC new -Asdev"
+    "new -Ac/dir|-u -CC new -Ac/dir"
+    "new -Ad -s foo|-u -CC new -Ad -s foo"
+    "new -d -A|-u -CC new -d -A"
+    "new vim -d|-u -CC new vim -d"
+    "new -- -d|-u -CC new -- -d"
+    "-L -d new|-u -CC -L -d new"
+    "attach -d|-u -CC attach -d"
+)
+
+for row in "${DETACHED_CASES[@]}"; do
+    run_one "tmux ${row%%|*}" "${row##*|}" "${row%%|*}"
+done
+run_one "tmux new -d \\; attach"    "-u -CC new -d ; attach"    "new -d \\; attach"
+
+# zsh and fish wrappers: the detached cases, skipped without the shell.
+check_shell() {
+    local label="$1" expected="$2" got="$3"
+    if [[ "$got" == "$expected" ]]; then
+        printf '  PASS  %s\n' "$label"
+        PASS=$((PASS + 1))
+    else
+        printf '  FAIL  %s\n        expected: %q\n        got:      %q\n' \
+            "$label" "$expected" "$got"
+        FAIL=$((FAIL + 1))
+    fi
+}
+
+if command -v zsh >/dev/null 2>&1; then
+    echo
+    echo "zsh wrapper tests"
+    for row in "${DETACHED_CASES[@]}" "new -d \; attach|-u -CC new -d ; attach"; do
+        check_shell "zsh: tmux ${row%%|*}" "${row##*|}" \
+            "$(PATH="$FAKE_DIR:$PATH" zsh -f -c "
+                source '$REPO/shell/ghostel-tmux.zsh'
+                tmux ${row%%|*}
+            " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
+    done
+fi
+
+if command -v fish >/dev/null 2>&1; then
+    echo
+    echo "fish wrapper tests"
+    for row in "${DETACHED_CASES[@]}" "new -d \; attach|-u -CC new -d ; attach"; do
+        check_shell "fish: tmux ${row%%|*}" "${row##*|}" \
+            "$(PATH="$FAKE_DIR:$PATH" fish --no-config -c "
+                source '$REPO/shell/ghostel-tmux.fish'
+                tmux ${row%%|*}
+            " 2>&1 | sed -n 's/.*TMUX-CALLED-WITH:\(.*\)/\1/p')"
+    done
 fi
 
 # --------------------------------------------------------------------------
@@ -115,19 +181,23 @@ if command -v nu >/dev/null 2>&1; then
         fi
     }
 
-    run_one_nu "nu: bare tmux"           "-CC"                    "tmux"
-    run_one_nu "nu: tmux new"            "-CC new"                "tmux new"
-    run_one_nu "nu: tmux attach -t foo"  "-CC attach -t foo"      "tmux attach -t foo"
-    run_one_nu "nu: tmux a -t bar"       "-CC a -t bar"           "tmux a -t bar"
+    run_one_nu "nu: bare tmux"           "-u -CC"                    "tmux"
+    run_one_nu "nu: tmux new"            "-u -CC new"                "tmux new"
+    run_one_nu "nu: tmux attach -t foo"  "-u -CC attach -t foo"      "tmux attach -t foo"
+    run_one_nu "nu: tmux a -t bar"       "-u -CC a -t bar"           "tmux a -t bar"
     run_one_nu "nu: tmux -CC new"        "-CC new"                "tmux -CC new"
     run_one_nu "nu: tmux -C ls"          "-C ls"                  "tmux -C ls"
     run_one_nu "nu: tmux ls"             "ls"                     "tmux ls"
     run_one_nu "nu: tmux kill-server"    "kill-server"            "tmux kill-server"
-    run_one_nu "nu: tmux -L sock new"    "-CC -L sock new"        "tmux -L sock new"
+    run_one_nu "nu: tmux -L sock new"    "-u -CC -L sock new"        "tmux -L sock new"
     run_one_nu "nu: tmux -L sock ls"     "-L sock ls"             "tmux -L sock ls"
     run_one_nu "nu: tmux -N ls"          "-N ls"                  "tmux -N ls"
-    run_one_nu "nu: tmux -T 256 new"     "-CC -T 256 new"         "tmux -T 256 new"
+    run_one_nu "nu: tmux -T 256 new"     "-u -CC -T 256 new"         "tmux -T 256 new"
     run_one_nu "nu: ^tmux new bypasses wrapper" "new"             "^tmux new"
+    for row in "${DETACHED_CASES[@]}"; do
+        run_one_nu "nu: tmux ${row%%|*}" "${row##*|}" "tmux ${row%%|*}"
+    done
+    run_one_nu "nu: tmux new -d ';' attach" "-u -CC new -d ; attach" "tmux new -d ';' attach"
 
     got_nocc=$(GHOSTEL_TMUX_NO_CC=1 INSIDE_EMACS=ghostel PATH="$FAKE_DIR:$PATH" \
         nu --no-config-file -c \
