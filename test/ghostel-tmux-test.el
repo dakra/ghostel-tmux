@@ -36,6 +36,64 @@
     (ghostel-tmux--feed-bytes string)))
 
 ;; ---------------------------------------------------------------------------
+;; Failing lines
+;; ---------------------------------------------------------------------------
+
+(ert-deftest ghostel-tmux-test-feed-survives-failing-line ()
+  "A line whose handler signals is consumed; later lines and chunks are handled."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((seen nil)
+          (reply nil))
+      (cl-letf (((symbol-function 'ghostel-tmux--on-output)
+                 (lambda (_pid data) (push data seen)))
+                ((symbol-function 'ghostel-tmux--controller-live-p)
+                 (lambda () t))
+                ((symbol-function 'ghostel-tmux--controller-send) #'ignore))
+        (ghostel-tmux--queue-command "x" (lambda (out) (setq reply out)))
+        (ghostel-tmux-test--feed
+         ctl (concat "\eP1000p%output %0 a\r\n"
+                     "%layout-change @0 ffff,bogus\r\n"
+                     "%output %0 b\r\n"))
+        (should (equal ghostel-tmux--line-buffer ""))
+        (ghostel-tmux-test--feed
+         ctl "%output %0 c\r\n%begin 1 2 1\r\nok\r\n%end 1 2 1\r\n")
+        (should (equal (reverse seen) '("a" "b" "c")))
+        (should (equal reply "ok"))
+        (should (equal ghostel-tmux--line-buffer ""))))))
+
+(ert-deftest ghostel-tmux-test-feed-keeps-position-on-nonlocal-exit ()
+  "A non-error exit from a handler still consumes the lines handled so far."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((seen nil))
+      (cl-letf (((symbol-function 'ghostel-tmux--on-output)
+                 (lambda (_pid data)
+                   (push data seen)
+                   (when (equal data "b") (throw 'stop nil)))))
+        (catch 'stop
+          (ghostel-tmux-test--feed
+           ctl "\eP1000p%output %0 a\r\n%output %0 b\r\n%output %0 c\r\n"))
+        (should (equal ghostel-tmux--line-buffer "%output %0 c\r\n"))
+        (ghostel-tmux-test--feed ctl "")
+        (should (equal (reverse seen) '("a" "b" "c")))))))
+
+;; `kill-buffer' leaves `other-buffer' current; `set-buffer' pins which one.
+(ert-deftest ghostel-tmux-test-feed-spares-next-buffer-when-killed ()
+  "A handler killing the feed buffer leaves the next current buffer's state alone."
+  (ghostel-tmux-test--with-controller other
+    (setq ghostel-tmux--line-buffer "%output %1 unconsumed\r\n")
+    (let ((lines nil))
+      (ghostel-tmux-test--with-controller ctl
+        (cl-letf (((symbol-function 'ghostel-tmux--handle-line)
+                   (lambda (line)
+                     (push line lines)
+                     (kill-buffer ctl)
+                     (set-buffer other))))
+          (ghostel-tmux-test--feed
+           ctl "\eP1000p%output %0 a\r\n%output %0 b\r\n")))
+      (should (equal lines '("%output %0 a"))))
+    (should (equal ghostel-tmux--line-buffer "%output %1 unconsumed\r\n"))))
+
+;; ---------------------------------------------------------------------------
 ;; Octal escape decoder
 ;; ---------------------------------------------------------------------------
 

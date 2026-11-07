@@ -381,22 +381,33 @@ Splits on newlines, dispatches per-line via the state machine."
     (when (string-match-p "^%" ghostel-tmux--line-buffer)
       (setq ghostel-tmux--parser-state 'idle)))
   (when (memq ghostel-tmux--parser-state '(idle notification block))
-    (let ((idx 0)
+    (let ((buffer (current-buffer))
+          (idx 0)
           (ghostel-tmux--in-feed t))
       ;; `ghostel-tmux--handle-line' may reset
       ;; `ghostel-tmux--line-buffer' under our feet — re-check the
       ;; buffer length before every match so a stale IDX can't index
-      ;; past the emptied accumulator.
-      (while (and (<= idx (length ghostel-tmux--line-buffer))
-                  (string-match "\r?\n" ghostel-tmux--line-buffer idx))
-        (let ((line (substring ghostel-tmux--line-buffer
-                               idx (match-beginning 0))))
-          (setq idx (match-end 0))
-          (ghostel-tmux--handle-line line)))
-      (setq ghostel-tmux--line-buffer
-            (if (<= idx (length ghostel-tmux--line-buffer))
-                (substring ghostel-tmux--line-buffer idx)
-              "")))))
+      ;; past the emptied accumulator.  It may also kill BUFFER: the
+      ;; buffer current then can be another controller.
+      (unwind-protect
+          (while (and (buffer-live-p buffer)
+                      (<= idx (length ghostel-tmux--line-buffer))
+                      (string-match "\r?\n" ghostel-tmux--line-buffer idx))
+            (let ((line (substring ghostel-tmux--line-buffer
+                                   idx (match-beginning 0))))
+              (setq idx (match-end 0))
+              ;; A line that fails must not stop the ones after it.
+              (condition-case err
+                  (ghostel-tmux--handle-line line)
+                (error
+                 (message "Ghostel-tmux: Error handling %S: %s"
+                          (truncate-string-to-width line 60)
+                          (error-message-string err))))))
+        (when (buffer-live-p buffer)
+          (setq ghostel-tmux--line-buffer
+                (if (<= idx (length ghostel-tmux--line-buffer))
+                    (substring ghostel-tmux--line-buffer idx)
+                  "")))))))
 
 (defun ghostel-tmux--handle-line (line)
   "Dispatch a single LINE (no trailing CRLF) through the state machine."
