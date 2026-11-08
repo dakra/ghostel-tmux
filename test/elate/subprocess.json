@@ -1,6 +1,6 @@
 {
   "name": "subprocess",
-  "comment": "The M-x commands that run their own `tmux -CC': attach, new, detach, capture, and the ways such a client ends, one pane per Emacs window (`ghostel-tmux-split-windows' off).",
+  "comment": "The M-x commands that run their own `tmux -CC': attach, new, detach, capture, and the ways such a client ends, one pane per Emacs window (`ghostel-tmux-split-windows' off), the panes kept as snapshots (`ghostel-tmux-keep-detached-panes' t).",
   "session": {
     "ui": "tty",
     "size": "120x36",
@@ -9,7 +9,8 @@
     "load": ["lib/ghostel-tmux-setup.el"],
     "eval": [
       "(elate-tmux-init \"subprocess\" \"/opt/homebrew/bin/bash\" t)",
-      "(setq ghostel-tmux-split-windows nil)"
+      "(setq ghostel-tmux-split-windows nil)",
+      "(setq ghostel-tmux-keep-detached-panes t)"
     ]
   },
   "defaults": {"timeout": 20},
@@ -254,7 +255,7 @@
     {"keys": "M-x ghostel-tmux-reset RET"},
     {"wait": "until", "pred": "(and (null (elate-tmux-controllers)) (null (elate-tmux-panes)))"},
     {"wait": "until", "pred": "(equal (elate-tmux-q \"#{session_attached}\" \"main\") \"0\")"},
-    {"assert": {"messages_match": "Session reset; pane buffers sealed"}},
+    {"assert": {"messages_match": "Session reset"}},
     {"keys": "M-x ghostel-tmux-attach RET", "delivery": "events"},
     {"wait": "until", "pred": "(elate-tmux-asking-p \"tmux session: \")"},
     {"type": "d1"},

@@ -2650,18 +2650,19 @@ tmux resizes that screen when the pane leaves the alternate one."
         (should-not sent)))))
 
 (ert-deftest ghostel-tmux-test-sentinel-names-a-detach ()
-  "A process killed by `ghostel-tmux-detach' is no failure; other ends are told."
-  (pcase-dolist (`(,closing ,event ,expected)
+  "A process ended by `ghostel-tmux-detach' is no failure; other ends are told."
+  (pcase-dolist (`(,detaching ,event ,expected)
                  '((t "killed: 9\n" "Ghostel-tmux: Detached")
+                   (t "finished\n" "Ghostel-tmux: Detached")
                    (nil "killed: 9\n" "Ghostel-tmux: killed: 9")
-                   (t "finished\n" "Ghostel-tmux: finished")))
+                   (nil "finished\n" "Ghostel-tmux: finished")))
     (let ((ctl (generate-new-buffer " *ghostel-tmux-test-ctl*"))
           (messages nil))
       (unwind-protect
           (progn
             (with-current-buffer ctl
               (ghostel-tmux-control-mode)
-              (setq ghostel-tmux--closing closing))
+              (setq ghostel-tmux--detaching detaching))
             (cl-letf (((symbol-function 'process-buffer) (lambda (_p) ctl))
                       ((symbol-function 'process-live-p) (lambda (_p) nil))
                       ((symbol-function 'message)
@@ -5570,16 +5571,62 @@ That layout is from before tmux got the tile's size."
         (should (eq (selected-window) (cadr windows)))
         (should-not (buffer-local-value 'ghostel-tmux--held-pane ctl))))))
 
-(ert-deftest ghostel-tmux-test-sealed-panes-leave-their-tile ()
-  "Sealing a session's panes keeps their windows, no longer a tile."
+(ert-deftest ghostel-tmux-test-sealed-panes-collapse-their-tile ()
+  "Sealing a session's panes leaves one window of a tile, no longer a tile."
   (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
     (ghostel-tmux--tile-build 0 (selected-window))
     (let ((windows (ghostel-tmux--tile-windows ctl 0)))
-      (cl-letf (((symbol-function 'ghostel-tmux--seal-pane-buffer) #'ignore))
-        (ghostel-tmux--seal-panes ctl))
+      (select-window (nth 1 windows))
+      (set-buffer ctl)
+      (ghostel-tmux--seal-panes ctl)
+      (should (equal (window-list nil 'no-mini) (list (nth 1 windows))))
+      (should-not (window-parameter (nth 1 windows) 'ghostel-tmux-tile))
+      (should-not (window-parameter (nth 1 windows) 'tab-line-format))
+      (with-current-buffer (window-buffer (nth 1 windows))
+        (should buffer-read-only)
+        (should (equal mode-name "Fundamental:detached"))))))
+
+(ert-deftest ghostel-tmux-test-sealing-keeps-a-tile-window-of-another-buffer ()
+  "A window of a tile showing another buffer stays when the panes are sealed."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (set-window-buffer (nth 1 windows) (get-buffer-create "*scratch*"))
+      (ghostel-tmux--seal-panes ctl)
       (should (cl-every #'window-live-p windows))
-      (should-not (cl-some (lambda (w) (window-parameter w 'ghostel-tmux-tile)) windows))
-      (should-not (cl-some (lambda (w) (window-parameter w 'tab-line-format)) windows)))))
+      (should-not (cl-some (lambda (w) (window-parameter w 'ghostel-tmux-tile)) windows)))))
+
+(ert-deftest ghostel-tmux-test-collapse-keeps-the-window-selected-before-the-minibuffer ()
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (select-window (nth 0 windows))
+      (cl-letf (((symbol-function 'minibuffer-selected-window) (lambda () (nth 1 windows))))
+        (should (eq (ghostel-tmux--tile-collapse (list (nth 1 windows) (nth 0 windows)
+                                                       (minibuffer-window)))
+                    (nth 0 windows))))
+      (should (window-live-p (nth 0 windows))))))
+
+(ert-deftest ghostel-tmux-test-keep-detached-panes ()
+  (let ((ghostel-tmux-keep-detached-panes 'ended))
+    (should (ghostel-tmux--keep-panes-p nil))
+    (should-not (ghostel-tmux--keep-panes-p t)))
+  (let ((ghostel-tmux-keep-detached-panes t))
+    (should (ghostel-tmux--keep-panes-p t)))
+  (let ((ghostel-tmux-keep-detached-panes nil))
+    (should-not (ghostel-tmux--keep-panes-p nil))))
+
+(ert-deftest ghostel-tmux-test-panes-of-a-session-that-goes-on-are-killed ()
+  "After a detach, the pane buffers go, collapsing their tile first."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((bufs (list (gethash 5 ghostel-tmux--panes) (gethash 6 ghostel-tmux--panes)))
+          (ghostel-tmux-keep-detached-panes 'ended))
+      (setq sent nil)
+      (ghostel-tmux--seal-panes ctl t)
+      (should-not (cl-some #'buffer-live-p bufs))
+      (should (= 1 (length (window-list nil 'no-mini))))
+      (should-not sent))))
 
 (ert-deftest ghostel-tmux-test-failed-layout-query-drops-a-pending-resize ()
   "A resize waiting for a layout that does not come is dropped."

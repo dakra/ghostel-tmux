@@ -19,7 +19,7 @@ tabs in the tab line.
 |-------------------------------------------------+-----------------------------------------------------------------------------------------|
 | =M-x ghostel-tmux-new=                            | Create or attach to a session by name.                                                   |
 | =M-x ghostel-tmux-attach=                         | Pick a running session via =completing-read= and attach.                                 |
-| =M-x ghostel-tmux-detach=                         | Detach the current session.  Pane buffers stay as read-only snapshots.                  |
+| =M-x ghostel-tmux-detach=                         | Detach the current session.  Its pane buffers go; see =ghostel-tmux-keep-detached-panes=. |
 | =M-x ghostel-tmux-capture=                        | One-shot snapshot: dump a single pane's scrollback into a fresh buffer (no live link).  |
 | =M-x ghostel-tmux-next-pane= / =ghostel-tmux-prev-pane= | Cycle through sibling panes, across tmux windows (=C-t C-n= / =C-t C-p=).              |
 | =M-x ghostel-tmux-switch-pane=                    | =completing-read= picker over sibling panes (=C-t s=).                                    |
@@ -49,7 +49,7 @@ and =M-x ghostel= starts a new shell.
 
 When tmux leaves control mode (=M-x ghostel-tmux-detach=, =C-t d= in a pane, or
 anything else that ends the session), every window showing a pane goes
-back to the shell buffer and the pane buffers stay as read-only snapshots.
+back to the shell buffer.
 
 A tmux client that dies without detaching (=kill -9=, a crash) leaves control
 mode open until the shell prints an escape sequence, which most prompts
@@ -202,6 +202,7 @@ at all stays on the hidden shell.
 | =ghostel-tmux-program=                | tmux executable.  Default ="tmux"=.                                                  |
 | =ghostel-tmux-prefix-key=             | Prefix key in pane buffers.  Default ="C-t"=.                                        |
 | =ghostel-tmux-split-windows=          | Show the panes of a tmux window as Emacs splits.  Default =t=.                       |
+| =ghostel-tmux-keep-detached-panes=    | Keep pane buffers as read-only snapshots (=Ghostel:detached=) when the session leaves Emacs: =ended= (default) when it ended, not after a detach, =t= always, =nil= never. |
 | =ghostel-tmux-history-lines=          | Scrollback lines to backfill via =capture-pane= on attach.  Default =10000=.          |
 | =ghostel-tmux-default-rows= / =-cols=   | Initial pane terminal size before the layout-resize fires.  Default =40= x =120=.     |
 | =ghostel-tmux-buffer-name-function=   | Customize pane buffer naming.  Called with =(SESSION WINDOW PANE-ID)=.               |

@@ -75,11 +75,13 @@
     {"wait": "until", "pred": "(> ghostel--term-rows 20)"},
     {"wait": "until", "pred": "(elate-tmux-sync-p)"},
 
-    {"group": "detach", "comment": "the shell comes back, the pane stays as a read-only snapshot, the session lives on"},
+    {"group": "detach", "comment": "the shell comes back, the pane stays as a read-only snapshot (kept for the re-attach group), the session lives on"},
+    {"eval": "(setq ghostel-tmux-keep-detached-panes t)"},
     {"eval": "(setq elate-old (current-buffer))"},
     {"keys": "C-t d"},
     {"wait": "until", "pred": "(and (not (elate-tmux-attached-p)) (eq (window-buffer) (get-buffer \"*ghostel*\")))"},
     {"assert": {"eval": "(with-current-buffer elate-old (and buffer-read-only (null ghostel-pty-out-function)))"}},
+    {"eval": "(setq ghostel-tmux-keep-detached-panes 'ended)"},
     {"wait": "until", "pred": "(equal (elate-tmux-q \"#{session_attached}\" \"t1\") \"0\")"},
     {"wait": "until", "pred": "(elate-tmux-prompt-p)"},
     {"type": "printf 'BA%sCK-OK\\n' ''"},
@@ -177,7 +179,7 @@
     {"keys": "RET"},
     {"wait": "until", "pred": "(elate-tmux-line-p \"SRV-DEAD\")"},
 
-    {"group": "host shell dies", "comment": "the panes are sealed"},
+    {"group": "host shell dies", "comment": "the panes are sealed, as the session's end is not known"},
     {"type": "tmux new -s t3"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(elate-tmux-shown)"},

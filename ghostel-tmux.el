@@ -105,6 +105,20 @@ value applies to the windows shown already."
            (ghostel-tmux--split-windows-changed)))
   :group 'ghostel-tmux)
 
+(defcustom ghostel-tmux-keep-detached-panes 'ended
+  "Whether the pane buffers of a session that left Emacs stay, read-only.
+With `ended', they stay when the session ended, as after its last shell
+exited or tmux was killed, and go after a detach, as the session goes
+on in tmux and attaching again shows its panes.  A session whose end
+is not known counts as ended: one not detached from Emacs that was a
+takeover, on another host, or whose client was killed in Emacs.  t
+keeps them always, nil never.  A split of their windows collapses to
+one window."
+  :type '(choice (const :tag "When the session ended" ended)
+                 (const :tag "Always" t)
+                 (const :tag "Never" nil))
+  :group 'ghostel-tmux)
+
 (defcustom ghostel-tmux-buffer-name-function
   #'ghostel-tmux--default-buffer-name
   "Function returning a pane buffer name.
@@ -166,6 +180,9 @@ window), :zooming (see `ghostel-tmux--ensure-pane-zoomed'), :zoomed (as
 the panes its tile was built with, :tile-size, its pixel size when last
 fitted or checked, :resize-pending (see `ghostel-tmux--tile-resize'),
 and :swap-order and :swap-query (see `ghostel-tmux--tile-swap').")
+
+(defvar-local ghostel-tmux--detaching nil
+  "Non-nil once `ghostel-tmux-detach' detached the session.")
 
 (defvar-local ghostel-tmux--client-size nil
   "The size last sent with `refresh-client -C', as (COLS . ROWS).")
@@ -513,6 +530,8 @@ that session."
             ghostel-resize-function nil
             ghostel-tmux--controller-buffer nil
             buffer-read-only t)
+      (when (and (stringp mode-name) (not (string-suffix-p ":detached" mode-name)))
+        (setq mode-name (concat mode-name ":detached")))
       ;; A snapshot has nowhere to send focus or mouse reports, and with
       ;; mouse tracking on, the wheel and clicks would go to them instead
       ;; of scrolling and selecting.
@@ -521,29 +540,52 @@ that session."
                            "\e[?1000l\e[?1002l\e[?1003l\e[?1004l"))
       (ghostel-tmux--drop-tab-line))))
 
-(defun ghostel-tmux--seal-panes (controller)
-  "Seal every pane buffer belonging to CONTROLLER read-only.
+(defun ghostel-tmux--keep-panes-p (alive)
+  "Return non-nil when the panes of a session that left stay as snapshots.
+ALIVE is non-nil when the session goes on in tmux.  See
+`ghostel-tmux-keep-detached-panes'."
+  (if (eq ghostel-tmux-keep-detached-panes 'ended)
+      (not alive)
+    ghostel-tmux-keep-detached-panes))
+
+(defun ghostel-tmux--controller-panes (controller)
+  "Return the pane buffers of CONTROLLER.
 CONTROLLER may already be a killed buffer; its pane table is gone
 then, so panes are found by scanning `buffer-list' for pane buffers
 whose back-pointer matches."
-  (ghostel-tmux--tile-dissolve controller)
   (if (buffer-live-p controller)
       (with-current-buffer controller
-        (when ghostel-tmux--panes
-          (maphash (lambda (_pid buf) (ghostel-tmux--seal-pane-buffer buf))
-                   ghostel-tmux--panes)))
-    (dolist (buf (buffer-list))
-      (when (and (buffer-local-value 'ghostel-tmux-pane-mode buf)
-                 (eq (buffer-local-value 'ghostel-tmux--controller-buffer buf)
-                     controller))
-        (ghostel-tmux--seal-pane-buffer buf)))))
+        (let (panes)
+          (when ghostel-tmux--panes
+            (maphash (lambda (_pid buf)
+                       (when (buffer-live-p buf)
+                         (push buf panes)))
+                     ghostel-tmux--panes))
+          panes))
+    (cl-remove-if-not (lambda (buf)
+                        (and (buffer-local-value 'ghostel-tmux-pane-mode buf)
+                             (eq (buffer-local-value 'ghostel-tmux--controller-buffer buf)
+                                 controller)))
+                      (buffer-list))))
+
+(defun ghostel-tmux--seal-panes (controller &optional alive)
+  "Seal every pane buffer belonging to CONTROLLER read-only, or kill it.
+ALIVE is non-nil when the session goes on in tmux, see
+`ghostel-tmux--keep-panes-p'.  Each of its tiles collapses to one
+window first."
+  (ghostel-tmux--tile-dissolve controller t)
+  (let ((keep (ghostel-tmux--keep-panes-p alive)))
+    (dolist (buf (ghostel-tmux--controller-panes controller))
+      (ghostel-tmux--seal-pane-buffer buf)
+      (unless keep
+        (kill-buffer buf)))))
 
 ;;;###autoload
 (defun ghostel-tmux-reset ()
   "Reset the tmux session this buffer belongs to.
 Kills a dedicated `tmux -CC' subprocess or exits control mode in an
-auto-takeover host; pane buffers are sealed read-only.  Escape hatch
-for a wedged parser."
+auto-takeover host; pane buffers are sealed read-only or killed, see
+`ghostel-tmux-keep-detached-panes'.  Escape hatch for a wedged parser."
   (interactive)
   (let ((controller (ghostel-tmux--active-controller)))
     (unless (buffer-live-p controller)
@@ -561,7 +603,7 @@ for a wedged parser."
                    (process-live-p ghostel-tmux--controller-process))
           (delete-process ghostel-tmux--controller-process))
         (ghostel-tmux--seal-panes controller)
-        (message "Ghostel-tmux: Session reset; pane buffers sealed"))))))
+        (message "Ghostel-tmux: Session reset"))))))
 
 
 ;; Notification dispatch
@@ -1528,18 +1570,26 @@ feeding `%output' are dropped, see `ghostel-tmux--in-write-vt'."
 (defun ghostel-tmux--sentinel (proc event)
   "Sentinel for the tmux -CC subprocess.  PROC ended with EVENT.
 When the controller dies — whether cleanly or because tmux got killed
-externally — seal each pane buffer so users' keystrokes don't silently
-no-op against a dead process.  Panes are sealed even when the
-controller buffer itself was killed before the process died.  The
-controller buffer has no further use and goes away."
+externally — each pane buffer is sealed or killed, see
+`ghostel-tmux-keep-detached-panes', also when the controller buffer
+itself was killed before the process died.  The controller buffer has
+no further use and goes away."
   (unless (process-live-p proc)
     (let* ((buf (process-buffer proc))
            (suffix "")
-           ;; `ghostel-tmux-detach' deletes the process.
            (detached (and (buffer-live-p buf)
-                          (string-prefix-p "killed" event)
-                          (buffer-local-value 'ghostel-tmux--closing buf))))
-      (ghostel-tmux--seal-panes buf)
+                          (buffer-local-value 'ghostel-tmux--detaching buf)))
+           ;; A local tmux that just sent `%exit' says whether the
+           ;; session is still there.
+           (alive (or detached
+                      (and (buffer-live-p buf)
+                           (with-current-buffer buf
+                             (and ghostel-tmux--closing
+                                  ghostel-tmux--session-name
+                                  (not (file-remote-p default-directory))
+                                  (ghostel-tmux--session-exists-p
+                                   ghostel-tmux--session-name)))))))
+      (ghostel-tmux--seal-panes buf alive)
       (when (buffer-live-p buf)
         (with-current-buffer buf
           ;; What a tmux that never reached control mode printed.
@@ -1882,7 +1932,7 @@ inert so a TUI program inside the pane receives the keystroke raw."
         ghostel-tmux--panes (make-hash-table)
         ghostel-tmux--windows (make-hash-table))
   ;; A killed controller buffer must not leave a zombie tmux -CC; the
-  ;; sentinel then seals the panes.
+  ;; sentinel then seals or kills the panes.
   (add-hook 'kill-buffer-hook #'ghostel-tmux--controller-killed nil t))
 
 (defun ghostel-tmux--controller-killed ()
@@ -2314,11 +2364,17 @@ on the pane it showed."
 
 (defun ghostel-tmux--tile-collapse (windows &optional keep)
   "Delete WINDOWS of a tile but KEEP, which takes their space.
-KEEP defaults to the selected window among them, or the first.  It
-leaves the tile, and is selected when one of WINDOWS was.  Return KEEP."
+KEEP defaults to the selected window among them, also the one selected
+before the minibuffer or by their frame, or the first.  It leaves the
+tile, and is selected when one of WINDOWS was.  Return KEEP."
   (save-current-buffer
     (let ((keep (or keep
-                    (car (memq (selected-window) windows))
+                    (cl-find-if (lambda (w) (memq w windows))
+                                (list (selected-window)
+                                      (minibuffer-selected-window)
+                                      (and windows
+                                           (frame-selected-window
+                                            (window-frame (car windows))))))
                     (car windows)))
           (selected (memq (selected-window) windows)))
       (dolist (window windows)
@@ -2835,16 +2891,25 @@ tmux refuses fits the windows to tmux's sizes."
         (ghostel-tmux--apply-pane-size buf window t)))))
 
 (defun ghostel-tmux--tile-dissolve (controller &optional collapse)
-  "Let the windows of CONTROLLER's tiles go, collapsed to one with COLLAPSE.
-Return the windows that remain of them."
+  "Let the windows of CONTROLLER's tiles go.
+With COLLAPSE, those showing a pane collapse to one.  Return the
+windows that remain of them."
   (let (kept)
     (pcase-dolist (`((,owner . ,_wid) . ,windows) (ghostel-tmux--tiles))
       (when (eq owner controller)
-        (if collapse
-            (push (ghostel-tmux--tile-collapse windows) kept)
+        (let ((panes (and collapse
+                          (cl-remove-if-not
+                           (lambda (w)
+                             (eq (buffer-local-value 'ghostel-tmux--controller-buffer
+                                                     (window-buffer w))
+                                 controller))
+                           windows))))
           (dolist (window windows)
-            (ghostel-tmux--leave-tile window)
-            (push window kept)))))
+            (unless (memq window panes)
+              (ghostel-tmux--leave-tile window)
+              (push window kept)))
+          (when panes
+            (push (ghostel-tmux--tile-collapse panes) kept)))))
     kept))
 
 
@@ -3077,7 +3142,8 @@ a reply while tmux stays attached: an empty line makes it leave."
         ghostel-tmux--pending-follow-wid nil
         ghostel-tmux--active-pane-id nil
         ghostel-tmux--client-size nil
-        ghostel-tmux--held-pane nil))
+        ghostel-tmux--held-pane nil
+        ghostel-tmux--detaching nil))
 
 (defun ghostel-tmux--enter-control-mode (buf)
   "Take over BUF (a ghostel buffer) as a tmux controller.
@@ -3112,8 +3178,9 @@ are created as the parser sees notifications.  The host is hidden, see
 
 (defun ghostel-tmux--exit-control-mode (buf)
   "Restore BUF to normal ghostel operation after tmux exited control mode.
-Pane buffers are sealed as read-only snapshots, and any windows showing
-them are returned to the host buffer so the user lands back at the shell."
+Any windows showing pane buffers are returned to the host buffer so the
+user lands back at the shell, and the pane buffers are sealed as
+read-only snapshots or killed, see `ghostel-tmux-keep-detached-panes'."
   (with-current-buffer buf
     (ghostel-tmux--tile-dissolve buf t)
     (let (pane-buffers)
@@ -3130,7 +3197,9 @@ them are returned to the host buffer so the user lands back at the shell."
          (when (memq (window-buffer window) pane-buffers)
            (with-selected-window window
              (switch-to-buffer buf))))
-       'no-minibuffer 'visible))
+       'no-minibuffer 'visible)
+      (unless (ghostel-tmux--keep-panes-p ghostel-tmux--detaching)
+        (mapc #'kill-buffer pane-buffers)))
     (ghostel-tmux--reset-session-state)
     (setq ghostel-tmux--controller-process nil
           ghostel-tmux--parser-state 'preamble
@@ -3150,10 +3219,12 @@ them are returned to the host buffer so the user lands back at the shell."
              (buffer-name buf) (ghostel-tmux--exit-suffix))))
 
 (defun ghostel-tmux--host-exited (buf _event)
-  "Seal pane state when the auto-takeover host BUF's shell dies.
+  "End control mode when the auto-takeover host BUF's shell dies.
 Runs from `ghostel-exit-functions' (added buffer-locally on control-mode
 entry): with the host process gone there is no control channel left, so
-panes are sealed read-only and the host reverts to a plain buffer."
+the panes are sealed read-only or killed, see
+`ghostel-tmux--exit-control-mode', and the host reverts to a plain
+buffer."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (when ghostel-tmux--dcs-active
@@ -3196,9 +3267,9 @@ in a dedicated window."
               (funcall fn window))))))))
 
 (defun ghostel-tmux--host-killed ()
-  "Seal the panes of this auto-takeover host, whose buffer is being killed.
+  "Seal or kill the panes of this auto-takeover host, whose buffer is being killed.
 `ghostel-exit-functions' does not run for a buffer that is gone."
-  (ghostel-tmux--seal-panes (current-buffer)))
+  (ghostel-tmux--seal-panes (current-buffer) ghostel-tmux--detaching))
 
 
 ;; Public commands
@@ -3562,7 +3633,8 @@ For sessions started via `ghostel-tmux-attach' or `ghostel-tmux-new',
 kills the dedicated control-mode subprocess.  For sessions taken over
 from an existing ghostel shell (takeover), sends `detach-client'
 and lets tmux exit control mode cleanly so the underlying shell
-continues running.  Pane buffers remain visible as read-only snapshots."
+continues running.  The pane buffers go, see
+`ghostel-tmux-keep-detached-panes'."
   (interactive)
   (let ((controller (ghostel-tmux--active-controller)))
     (unless (buffer-live-p controller)
@@ -3570,6 +3642,7 @@ continues running.  Pane buffers remain visible as read-only snapshots."
     (with-current-buffer controller
       (let ((dedicated (derived-mode-p 'ghostel-tmux-control-mode)))
         (when (ghostel-tmux--controller-live-p)
+          (setq ghostel-tmux--detaching t)
           (ghostel-tmux--queue-command "detach-client")
           (setq ghostel-tmux--closing t)
           ;; Give tmux a brief moment to acknowledge the detach (and,
@@ -3586,7 +3659,7 @@ continues running.  Pane buffers remain visible as read-only snapshots."
           ;; Dedicated controller buffer: kill its tmux -CC subprocess.
           (when ghostel-tmux--controller-process
             (delete-process ghostel-tmux--controller-process))
-          (ghostel-tmux--seal-panes controller))
+          (ghostel-tmux--seal-panes controller t))
          (t
           ;; Auto-takeover host: tmux will exit control mode in response,
           ;; the native handler sees the DCS terminator, and

@@ -134,10 +134,12 @@
     {"eval": "(sit-for 1)"},
     {"assert": {"eval": "(and (eq (current-buffer) elate-b) (elate-tmux-active-p) (elate-tmux-split-p 2))"}},
 
-    {"group": "leave", "comment": "C-t d detaches; no window is left part of a split"},
+    {"group": "leave", "comment": "C-t d detaches; the split is one window, the pane buffers go"},
+    {"assert": {"eval": "(= 2 (length (window-list)))"}},
     {"keys": "C-t d"},
     {"wait": "until", "pred": "(and (not (elate-tmux-attached-p)) (null (elate-tmux-panes)))"},
     {"assert": {"eval": "(elate-tmux-no-split-p)"}},
+    {"assert": {"eval": "(and (= 1 (length (window-list))) (not (seq-some (lambda (b) (buffer-local-value 'ghostel-tmux-pane-mode b)) (buffer-list))))"}},
     {"assert": {"eval": "{{left}}"}},
 
     {"group": "cleanup", "comment": "no server is left"},
