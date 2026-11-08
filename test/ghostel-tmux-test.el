@@ -956,13 +956,14 @@ fills its output queue between the two repeats the CR."
   ;; `:keymap', which composes with the local input-mode map via the
   ;; standard minor-mode dispatch.
   (should (equal ghostel-tmux-prefix-key "C-t"))
-  (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-t"))
+  (should (eq (keymap-parent (lookup-key ghostel-tmux-pane-mode-map
+                                         (kbd "C-t")))
               ghostel-tmux-prefix-map)))
 
 (ert-deftest ghostel-tmux-test-pane-mode-map-prefix-self-binding ()
   ;; `<prefix> <prefix>' sends the prefix byte raw to the underlying
   ;; program, matching tmux's convention.
-  (should (eq (lookup-key ghostel-tmux-prefix-map (kbd "C-t"))
+  (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-t C-t"))
               #'ghostel-tmux--prefix-self-insert)))
 
 (ert-deftest ghostel-tmux-test-pane-mode-map-customization-rebinds ()
@@ -972,12 +973,19 @@ fills its output queue between the two repeats the CR."
     (unwind-protect
         (progn
           (customize-set-variable 'ghostel-tmux-prefix-key "C-b")
-          (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-b"))
-                      ghostel-tmux-prefix-map))
           (should-not (lookup-key ghostel-tmux-pane-mode-map (kbd "C-t")))
-          (should (eq (lookup-key ghostel-tmux-prefix-map (kbd "C-b"))
+          (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-b C-b"))
                       #'ghostel-tmux--prefix-self-insert))
-          (should-not (lookup-key ghostel-tmux-prefix-map (kbd "C-t"))))
+          (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-b d"))
+                      #'ghostel-tmux-detach))
+          ;; A prefix that is also a key in the prefix map keeps its
+          ;; command once the prefix moves on.
+          (customize-set-variable 'ghostel-tmux-prefix-key "C-n")
+          (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-n C-n"))
+                      #'ghostel-tmux--prefix-self-insert))
+          (customize-set-variable 'ghostel-tmux-prefix-key "C-t")
+          (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-t C-n"))
+                      #'ghostel-tmux-next-pane)))
       (customize-set-variable 'ghostel-tmux-prefix-key orig))))
 
 (ert-deftest ghostel-tmux-test-pane-mode-wins-over-local-map ()
@@ -990,7 +998,7 @@ fills its output queue between the two repeats the CR."
       (should (eq (key-binding (kbd "C-t")) #'ignore))
       (ghostel-tmux-pane-mode 1)
       (unwind-protect
-          (should (eq (key-binding (kbd "C-t")) ghostel-tmux-prefix-map))
+          (should (eq (key-binding (kbd "C-t d")) #'ghostel-tmux-detach))
         (ghostel-tmux-pane-mode -1)))))
 
 (ert-deftest ghostel-tmux-test-pane-mode-composes-with-local-map ()
@@ -1005,18 +1013,18 @@ fills its output queue between the two repeats the CR."
     (unwind-protect
         (progn
           (should (eq (key-binding (kbd "RET")) #'newline))
-          (should (eq (key-binding (kbd "C-t")) ghostel-tmux-prefix-map)))
+          (should (eq (key-binding (kbd "C-t d")) #'ghostel-tmux-detach)))
       (ghostel-tmux-pane-mode -1))))
 
-(ert-deftest ghostel-tmux-test-pane-mode-map-cc-bindings-installed ()
-  (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-c C-n"))
-              #'ghostel-tmux-next-pane))
-  (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-c C-p"))
-              #'ghostel-tmux-prev-pane))
-  (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-c C-s"))
-              #'ghostel-tmux-switch-pane))
-  (should (eq (lookup-key ghostel-tmux-pane-mode-map (kbd "C-c C-d"))
-              #'ghostel-tmux-detach)))
+(ert-deftest ghostel-tmux-test-pane-mode-leaves-ghostel-keys-alone ()
+  (with-temp-buffer
+    (use-local-map ghostel-semi-char-mode-map)
+    (ghostel-tmux-pane-mode 1)
+    (unwind-protect
+        (progn
+          (should (eq (key-binding (kbd "C-c C-n")) #'ghostel-next-hyperlink))
+          (should (eq (key-binding (kbd "C-t C-n")) #'ghostel-tmux-next-pane)))
+      (ghostel-tmux-pane-mode -1))))
 
 ;; ---------------------------------------------------------------------------
 ;; on-window-renamed regression (preserves session name across buffer switch)
@@ -1189,7 +1197,7 @@ fills its output queue between the two repeats the CR."
         (should-not (gethash 40 ghostel-tmux--windows))))))
 
 (ert-deftest ghostel-tmux-test-cycle-pane-sends-select-pane ()
-  ;; `--cycle-pane' (C-c C-n / C-c C-p) sends `select-pane' to tmux
+  ;; `--cycle-pane' (C-t C-n / C-t C-p) sends `select-pane' to tmux
   ;; and lets `%window-pane-changed' drive the visible switch.  No
   ;; direct `--display-pane-in-window' call.
   (let ((cmds nil)
@@ -1215,6 +1223,37 @@ fills its output queue between the two repeats the CR."
           (should (null displayed)))
       (kill-buffer pane-a)
       (kill-buffer pane-b))))
+
+(ert-deftest ghostel-tmux-test-cycle-pane-repeat-steps-on ()
+  ;; Repeats that run before tmux's report arrives step on from the
+  ;; pane last asked for, not from the buffer still shown.
+  (let ((cmds nil)
+        (panes (list (generate-new-buffer "*test-cr-a*")
+                     (generate-new-buffer "*test-cr-b*")
+                     (generate-new-buffer "*test-cr-c*"))))
+    (unwind-protect
+        (ghostel-tmux-test--with-controller ctl
+          (cl-loop for buf in panes for id from 1
+                   do (with-current-buffer buf
+                        (setq-local ghostel-tmux--pane-id id)
+                        (setq-local ghostel-tmux--controller-buffer ctl)))
+          (cl-letf (((symbol-function 'ghostel-tmux--cmd)
+                     (lambda (c) (push c cmds)))
+                    ((symbol-function 'ghostel-tmux--pane-list)
+                     (lambda (_ctl) panes)))
+            (with-current-buffer (car panes)
+              (let ((last-command nil))
+                (ghostel-tmux-next-pane))
+              (let ((last-command 'ghostel-tmux-next-pane))
+                (ghostel-tmux-next-pane))
+              (let ((last-command 'ghostel-tmux-next-pane))
+                (ghostel-tmux-prev-pane))
+              (let ((last-command 'ignore))
+                (ghostel-tmux-prev-pane))))
+          (should (equal (reverse cmds)
+                         '("select-pane -t %2" "select-pane -t %3"
+                           "select-pane -t %2" "select-pane -t %3"))))
+      (mapc #'kill-buffer panes))))
 
 (ert-deftest ghostel-tmux-test-switch-pane-sends-select-pane ()
   ;; Same source-of-truth model: completing-read pane switching sends

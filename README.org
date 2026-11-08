@@ -21,8 +21,8 @@ tab line.
 | =M-x ghostel-tmux-attach=                         | Pick a running session via =completing-read= and attach.                                 |
 | =M-x ghostel-tmux-detach=                         | Detach the current session.  Pane buffers stay as read-only snapshots.                  |
 | =M-x ghostel-tmux-capture=                        | One-shot snapshot: dump a single pane's scrollback into a fresh buffer (no live link).  |
-| =M-x ghostel-tmux-next-pane= / =ghostel-tmux-prev-pane= | Cycle through sibling panes (also bound to =C-c C-n= / =C-c C-p=).                    |
-| =M-x ghostel-tmux-switch-pane=                    | =completing-read= picker over sibling panes (=C-c C-s=).                                  |
+| =M-x ghostel-tmux-next-pane= / =ghostel-tmux-prev-pane= | Cycle through sibling panes, across tmux windows (=C-t C-n= / =C-t C-p=).              |
+| =M-x ghostel-tmux-switch-pane=                    | =completing-read= picker over sibling panes (=C-t s=).                                    |
 | =M-x ghostel-tmux-reset=                          | Escape hatch: reset tmux state when the protocol parser is wedged.                      |
 
 With a remote =default-directory=, =ghostel-tmux-new=, =ghostel-tmux-attach= and
@@ -101,6 +101,9 @@ over the active session, so they work the same whether you started tmux via
 | =C-t n=        | =next-window=           | Cycle to the next window.                    |
 | =C-t p=        | =previous-window=       | Cycle to the previous window.                |
 | =C-t o=        | =select-pane -t :.+=    | Cycle to the next pane.                      |
+| =C-t C-n=      | -                     | Next pane in tab order, across windows.      |
+| =C-t C-p=      | -                     | Previous pane in tab order, across windows.  |
+| =C-t s=        | -                     | Pick a pane with =completing-read=.          |
 | =C-t ,=        | =rename-window=         | Prompt and rename the current window.       |
 | =C-t $=        | =rename-session=        | Prompt and rename the current session.      |
 | =C-t 0= ... =9=  | =select-window -t :N=   | Jump to window N.                            |
@@ -110,13 +113,12 @@ over the active session, so they work the same whether you started tmux via
 | =C-t C-t=      | -                     | Send a literal prefix byte to the program.   |
 
 The map is =ghostel-tmux-prefix-map=; rebind individual keys however you like.
-Switching panes via the Emacs keymap (=C-c C-n= / =C-c C-p= / =C-c C-s=) also works,
-as does clicking a tab in the tab-line.
+With =repeat-mode=, =C-n= and =C-p= repeat after =C-t C-n= or =C-t C-p=.
 
 * Tab line
 
 Each pane buffer enables =tab-line-mode= and lists the session's other panes as
-tabs.  Click a tab - or hit =C-c C-n= / =C-c C-p= - to switch panes in the same
+tabs.  Click a tab - or hit =C-t C-n= / =C-t C-p= - to switch panes in the same
 window.
 
 * Sizing

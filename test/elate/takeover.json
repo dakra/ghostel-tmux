@@ -77,7 +77,7 @@
 
     {"group": "detach", "comment": "the shell comes back, the pane stays as a read-only snapshot, the session lives on"},
     {"eval": "(setq elate-old (current-buffer))"},
-    {"keys": "C-c C-d"},
+    {"keys": "C-t d"},
     {"wait": "until", "pred": "(and (not (elate-tmux-attached-p)) (eq (window-buffer) (get-buffer \"*ghostel*\")))"},
     {"assert": {"eval": "(with-current-buffer elate-old (and buffer-read-only (null ghostel-pty-out-function)))"}},
     {"wait": "until", "pred": "(equal (elate-tmux-q \"#{session_attached}\" \"t1\") \"0\")"},
@@ -126,7 +126,7 @@
     {"wait": "until", "pred": "(and (not (equal (elate-tmux-id) elate-cur)) (elate-tmux-sync-p))"},
     {"keys": "C-t 1"},
     {"wait": "until", "pred": "(and (equal (elate-tmux-id) elate-cur) (elate-tmux-sync-p))"},
-    {"keys": "C-c C-d"},
+    {"keys": "C-t d"},
     {"wait": "until", "pred": "(and (not (elate-tmux-attached-p)) (eq (window-buffer) (get-buffer \"*ghostel*\")))"},
     {"wait": "until", "pred": "(equal (elate-tmux-q \"#{session_attached}\" \"t1\") \"0\")"},
     {"eval": "(progn (elate-tmux-call \"kill-window\" \"-t\" \"t1:1\") t)"},

@@ -60,8 +60,6 @@ With a remote `default-directory', it names a program on that host."
   :type 'string
   :group 'ghostel-tmux)
 
-(defvar ghostel-tmux-prefix-map)  ; Forward declaration for the defcustom :set function.
-
 (defcustom ghostel-tmux-prefix-key "C-t"
   "Key sequence used as the tmux prefix in pane buffers.
 A `kbd'-style string (e.g. \"\\`C-t'\", \"\\`C-b'\").  Changing this
@@ -73,9 +71,8 @@ buffers pick up the change immediately."
          (let ((old (and (boundp sym) (symbol-value sym))))
            (set-default sym val)
            (when (boundp 'ghostel-tmux-pane-mode-map)
-             (when (and old (not (equal old val)))
-               (define-key ghostel-tmux-pane-mode-map (kbd old) nil)
-               (define-key ghostel-tmux-prefix-map (kbd old) nil))
+             (when old
+               (define-key ghostel-tmux-pane-mode-map (kbd old) nil))
              (ghostel-tmux--install-prefix-key val)))))
 
 (defcustom ghostel-tmux-default-rows 40
@@ -1644,8 +1641,21 @@ The visible switch happens reactively in `--on-session-window-changed'."
           (format "Switch to window %d in the current tmux session." idx))
         fn))))
 
-;; `<prefix> d': detach (matches tmux's default).
+;; Detach as in tmux, panes in tab order across tmux windows, and the
+;; pane picker.
 (define-key ghostel-tmux-prefix-map (kbd "d") #'ghostel-tmux-detach)
+(define-key ghostel-tmux-prefix-map (kbd "C-n") #'ghostel-tmux-next-pane)
+(define-key ghostel-tmux-prefix-map (kbd "C-p") #'ghostel-tmux-prev-pane)
+(define-key ghostel-tmux-prefix-map (kbd "s") #'ghostel-tmux-switch-pane)
+
+(defvar ghostel-tmux-pane-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-n") #'ghostel-tmux-next-pane)
+    (define-key map (kbd "C-p") #'ghostel-tmux-prev-pane)
+    map)
+  "Keymap to repeat the pane cycling commands in `repeat-mode'.")
+(dolist (cmd '(ghostel-tmux-next-pane ghostel-tmux-prev-pane))
+  (put cmd 'repeat-map 'ghostel-tmux-pane-repeat-map))
 
 ;; `<prefix> ?': describe the prefix map.
 (define-key ghostel-tmux-prefix-map (kbd "?")
@@ -1655,9 +1665,9 @@ The visible switch happens reactively in `--on-session-window-changed'."
 
 (defun ghostel-tmux--prefix-self-insert ()
   "Send the tmux prefix key itself to the underlying program.
-Bound under `ghostel-tmux-prefix-map' as `<prefix> <prefix>', matching
-tmux's convention.  Only meaningful when `ghostel-tmux-prefix-key'
-resolves to a single control byte (`C-<letter>')."
+Bound as `<prefix> <prefix>', matching tmux's convention.  Only
+meaningful when `ghostel-tmux-prefix-key' resolves to a single control
+byte (`C-<letter>')."
   (interactive)
   (let* ((seq (kbd ghostel-tmux-prefix-key))
          (byte (and (= (length seq) 1)
@@ -1668,29 +1678,17 @@ resolves to a single control byte (`C-<letter>')."
       (message "Ghostel-tmux: %S is not a control byte; cannot send raw"
                ghostel-tmux-prefix-key))))
 
-(defvar ghostel-tmux-pane-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-n") #'ghostel-tmux-next-pane)
-    (define-key map (kbd "C-c C-p") #'ghostel-tmux-prev-pane)
-    (define-key map (kbd "C-c C-s") #'ghostel-tmux-switch-pane)
-    (define-key map (kbd "C-c C-d") #'ghostel-tmux-detach)
-    map)
-  "Keymap for `ghostel-tmux-pane-mode'.
-Sits above the local input-mode map via the standard minor-mode
-dispatch, so the tmux prefix and `C-c' navigation compose with
-ghostel's semi-char, line, and emacs-mode input maps without
-replacing their bindings.  In char mode the emulation-alist
-\(`ghostel-char-mode-map') sits above minor-mode keymaps, so the
-prefix is intentionally inert and the underlying program receives
-the keystroke raw.")
+(defvar ghostel-tmux-pane-mode-map (make-sparse-keymap)
+  "Keymap for `ghostel-tmux-pane-mode': the tmux prefix.")
 
 (defun ghostel-tmux--install-prefix-key (key)
-  "Install KEY as the tmux prefix in `ghostel-tmux-pane-mode-map'.
-Also binds `<prefix> <prefix>' in the prefix sub-map to send the
-prefix byte raw to the underlying program."
-  (define-key ghostel-tmux-pane-mode-map (kbd key) ghostel-tmux-prefix-map)
-  (define-key ghostel-tmux-prefix-map (kbd key)
-              #'ghostel-tmux--prefix-self-insert))
+  "Bind KEY in `ghostel-tmux-pane-mode-map' to the tmux prefix commands.
+The map is a child of `ghostel-tmux-prefix-map' in which KEY twice sends
+the prefix byte to the underlying program."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map ghostel-tmux-prefix-map)
+    (define-key map (kbd key) #'ghostel-tmux--prefix-self-insert)
+    (define-key ghostel-tmux-pane-mode-map (kbd key) map)))
 
 (ghostel-tmux--install-prefix-key ghostel-tmux-prefix-key)
 
@@ -1698,10 +1696,9 @@ prefix byte raw to the underlying program."
   "Minor mode making this ghostel buffer act as a tmux pane.
 Activated when the controller materializes a pane buffer.  Composes
 with the active ghostel input mode (semi-char, line, or
-emacs-mode) — the tmux prefix and `C-c' navigation are added
-without replacing the terminal's key bindings.  In char mode the
-prefix is intentionally inert so a TUI program inside the pane
-receives the keystroke raw."
+emacs-mode) — the tmux prefix is added without replacing the
+terminal's key bindings.  In char mode the prefix is intentionally
+inert so a TUI program inside the pane receives the keystroke raw."
   :lighter " Tmux"
   :keymap ghostel-tmux-pane-mode-map
   (cond
@@ -2313,19 +2310,28 @@ continues running.  Pane buffers remain visible as read-only snapshots."
   (interactive)
   (ghostel-tmux--cycle-pane -1))
 
+(defvar ghostel-tmux--cycle-target nil
+  "Pane buffer the last `ghostel-tmux--cycle-pane' asked tmux for.")
+
 (defun ghostel-tmux--cycle-pane (direction)
   "Ask tmux to make the next pane in DIRECTION (+1 or -1) active.
-The visible switch follows tmux's reports."
+The visible switch follows tmux's reports.  A repeated cycle steps on
+from the pane it last asked for, whose report may still be on its way."
   (let* ((controller ghostel-tmux--controller-buffer)
          (panes (and (buffer-live-p controller)
                      (ghostel-tmux--pane-list controller)))
-         (here (current-buffer))
+         (here (if (and (memq last-command
+                              '(ghostel-tmux-next-pane ghostel-tmux-prev-pane))
+                        (memq ghostel-tmux--cycle-target panes))
+                   ghostel-tmux--cycle-target
+                 (current-buffer)))
          (idx (cl-position here panes :test #'eq))
          (target (cond
                   ((null panes)
                    (user-error "Ghostel-tmux: No sibling panes"))
                   ((null idx) (car panes))
                   (t (nth (mod (+ idx direction) (length panes)) panes)))))
+    (setq ghostel-tmux--cycle-target target)
     (ghostel-tmux--select-pane-buffer target)))
 
 (defun ghostel-tmux--select-pane-buffer (pane-buf)
