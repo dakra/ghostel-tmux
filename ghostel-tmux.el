@@ -178,6 +178,10 @@ shell of a takeover as typed input.")
 In control mode a leading space hides the host from `switch-to-buffer'
 completion.  Restored on exit.")
 
+(defvar-local ghostel-tmux--host-identity nil
+  "The `ghostel-identity' of an auto-takeover host, saved on entry.
+The host has none in control mode, so that `ghostel' does not pick it.")
+
 (defvar ghostel-tmux--in-write-vt nil
   "Non-nil while feeding tmux `%output' bytes into a pane's VT engine.
 The engine's replies to queries in the output (OSC colors, DA, cursor
@@ -824,6 +828,13 @@ The selected window comes first."
           ghostel-tmux--session-name name)
     (cond
      (first
+      ;; Lines typed into a takeover host before this, reached tmux as
+      ;; commands: drop their replies and whatever reason they gave.  A
+      ;; line typed without RET joins the first line sent, so that line
+      ;; is a spare.
+      (when ghostel-tmux--dcs-active
+        (setq ghostel-tmux--exit-reason nil)
+        (ghostel-tmux--queue-until-marker "display-message -p ''" #'ignore))
       (ghostel-tmux--request-window-rows t))
      (changed
       ;; Switching sessions resets pane state.  Wipe and reload; the
@@ -1433,7 +1444,7 @@ controller buffer has no further use and goes away."
 ;; Modes
 
 (defconst ghostel-tmux--typed-reply-end "ghostel-tmux-reply-end"
-  "What the marker command after a typed command prints.")
+  "What the marker command of `ghostel-tmux--queue-until-marker' prints.")
 
 (defun ghostel-tmux--report-failure (command text)
   "Tell the user that tmux refused COMMAND, for the reason TEXT."
@@ -1454,27 +1465,34 @@ A plain `display-message' answers with a `%message' line."
   (when errors
     (ghostel-tmux--report-failure command (string-join errors "\n"))))
 
+(defun ghostel-tmux--queue-until-marker (command on-block &optional on-done)
+  "Queue COMMAND, then a marker command, and stay in flight until its block.
+COMMAND may answer with any number of blocks.  ON-BLOCK is called with
+the payload of each block before the marker's, nil for an error, and
+ON-DONE then without arguments."
+  (letrec ((cont (lambda (output)
+                   (cond
+                    ((equal output ghostel-tmux--typed-reply-end)
+                     (when on-done (funcall on-done)))
+                    (t
+                     (funcall on-block output)
+                     (setq ghostel-tmux--command-in-flight
+                           (cons command cont)))))))
+    (ghostel-tmux--queue-command
+     (format "%s\ndisplay-message -p %s" command ghostel-tmux--typed-reply-end)
+     cont)))
+
 (defun ghostel-tmux--queue-typed-command (command)
-  "Queue COMMAND, written by the user, and show what tmux answers.
-Free text gets any number of reply blocks, also none: a marker command
-goes after it, and COMMAND stays in flight until the marker's block."
+  "Queue COMMAND, written by the user, and show what tmux answers."
   (let (outputs errors)
-    (letrec ((on-block
-              (lambda (output)
-                (cond
-                 ((equal output ghostel-tmux--typed-reply-end)
-                  (ghostel-tmux--show-reply
-                   command (reverse outputs) (reverse errors)))
-                 (t
-                  (if output
-                      (push output outputs)
-                    (push ghostel-tmux--reply-error errors))
-                  (setq ghostel-tmux--command-in-flight
-                        (cons command on-block)))))))
-      (ghostel-tmux--queue-command
-       (format "%s\ndisplay-message -p %s"
-               command ghostel-tmux--typed-reply-end)
-       on-block))))
+    (ghostel-tmux--queue-until-marker
+     command
+     (lambda (output)
+       (if output
+           (push output outputs)
+         (push ghostel-tmux--reply-error errors)))
+     (lambda ()
+       (ghostel-tmux--show-reply command (reverse outputs) (reverse errors))))))
 
 (defun ghostel-tmux--cmd (command &optional typed)
   "Run tmux command-mode COMMAND through the active controller.
@@ -1905,8 +1923,11 @@ are created as the parser sees notifications.  The host is hidden, see
     (let ((original-name (buffer-name)))
       (setq ghostel-tmux--auto-original-name original-name)
       (rename-buffer (format " *ghostel-tmux-host:%s*" original-name) t))
+    (setq ghostel-tmux--host-identity ghostel-identity
+          ghostel-identity nil)
     (add-hook 'ghostel-exit-functions #'ghostel-tmux--host-exited nil t)
     (add-hook 'kill-buffer-hook #'ghostel-tmux--host-killed nil t)
+    (add-hook 'window-buffer-change-functions #'ghostel-tmux--hide-host nil t)
     ;; `ghostel-tmux--controller-process' stays nil: the control stream
     ;; rides the host PTY, which `ghostel-tmux--controller-send' reaches
     ;; through `ghostel--write-pty'.
@@ -1950,11 +1971,13 @@ them are returned to the host buffer so the user lands back at the shell."
           ghostel-tmux--windows nil)
     (remove-hook 'ghostel-exit-functions #'ghostel-tmux--host-exited t)
     (remove-hook 'kill-buffer-hook #'ghostel-tmux--host-killed t)
+    (remove-hook 'window-buffer-change-functions #'ghostel-tmux--hide-host t)
     ;; Restore the host buffer's original (visible) name, if we renamed
     ;; it during entry to hide it from the user-visible buffer list.
     (when ghostel-tmux--auto-original-name
       (let ((original ghostel-tmux--auto-original-name))
         (setq ghostel-tmux--auto-original-name nil)
+        (ghostel-tmux--restore-identity)
         (ignore-errors (rename-buffer original t))))
     (message "Ghostel-tmux: Exited control mode (buffer %s)%s"
              (buffer-name buf) (ghostel-tmux--exit-suffix))))
@@ -1969,6 +1992,41 @@ panes are sealed read-only and the host reverts to a plain buffer."
       (when ghostel-tmux--dcs-active
         (setq ghostel-tmux--dcs-active nil)
         (ghostel-tmux--exit-control-mode buf)))))
+
+(defun ghostel-tmux--restore-identity ()
+  "Give this host its `ghostel-identity' back, as a new instance if taken."
+  (let ((identity ghostel-tmux--host-identity))
+    (when (and (assq 'instance identity)
+               (ghostel--find-buffer-by-identity identity))
+      (let ((context (assq-delete-all 'instance (copy-alist identity))))
+        (setq identity (cons (cons 'instance (ghostel--next-instance context))
+                             context))))
+    (setq ghostel-identity identity
+          ghostel-tmux--host-identity nil)))
+
+(defun ghostel-tmux--hide-host (window)
+  "Show WINDOW's previous buffer in place of a takeover host.
+What is typed in the host would reach tmux as commands.  The host stays
+in `ghostel-tmux--auto-host-window', where a pane is to replace it, and
+in a dedicated window."
+  (let ((host (and (window-live-p window) (window-buffer window))))
+    (when (and host
+               (buffer-local-value 'ghostel-tmux--dcs-active host)
+               (not (eq window (buffer-local-value
+                                'ghostel-tmux--auto-host-window host)))
+               (memq (window-dedicated-p window) '(nil side)))
+      (bury-buffer-internal host)
+      ;; Window change functions are done with WINDOW for this round, so
+      ;; the buffer shown now would miss its own.
+      (switch-to-prev-buffer window t)
+      (let ((buf (window-buffer window)))
+        (dolist (fn (and (not (eq buf host))
+                         (local-variable-p 'window-buffer-change-functions buf)
+                         (buffer-local-value 'window-buffer-change-functions
+                                             buf)))
+          (unless (eq fn t)
+            (with-current-buffer buf
+              (funcall fn window))))))))
 
 (defun ghostel-tmux--host-killed ()
   "Seal the panes of this auto-takeover host, whose buffer is being killed.

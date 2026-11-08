@@ -41,6 +41,9 @@ shell turns that shell's buffer into the controller.  This works in
 native-PTY, Emacs-PTY and TRAMP sessions alike, and for =tmux -CC attach=
 typed inside an ssh session.  The first pane shows up in the window the
 shell was in, sized to it, and the tab line lists the sibling panes.
+While tmux is attached, what is typed in the shell buffer goes to tmux as
+commands, so a window switching to it shows its previous buffer instead,
+and =M-x ghostel= starts a new shell.
 
 When tmux leaves control mode (=M-x ghostel-tmux-detach=, =C-t d= in a pane, or
 anything else that ends the session), every window showing a pane goes

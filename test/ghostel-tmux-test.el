@@ -3845,17 +3845,175 @@ SPEC is (FOLLOWED): that variable collects followed panes."
     (unwind-protect
         (progn
           (with-current-buffer host
-            (ghostel-mode))
+            (ghostel-mode)
+            (setq ghostel-identity '((kind . term))))
           (ghostel-tmux--enter-control-mode host)
           (should (string-prefix-p " *ghostel-tmux-host:" (buffer-name host)))
           (should (equal (buffer-local-value
                           'ghostel-tmux--auto-original-name host)
                          "*tmux-test-host-rename*"))
+          ;; `ghostel' must not find the host, nor show it in a window.
+          (should-not (buffer-local-value 'ghostel-identity host))
+          (with-current-buffer host
+            (should (memq #'ghostel-tmux--hide-host
+                          window-buffer-change-functions)))
           (ghostel-tmux--exit-control-mode host)
           (should (equal (buffer-name host) "*tmux-test-host-rename*"))
           (should-not (buffer-local-value
-                       'ghostel-tmux--auto-original-name host)))
+                       'ghostel-tmux--auto-original-name host))
+          (should (equal (buffer-local-value 'ghostel-identity host)
+                         '((kind . term))))
+          (with-current-buffer host
+            (should-not (memq #'ghostel-tmux--hide-host
+                              window-buffer-change-functions))))
       (when (buffer-live-p host) (kill-buffer host)))))
+
+(ert-deftest ghostel-tmux-test-hide-host-shows-previous-buffer ()
+  (let ((prev (generate-new-buffer "*tmux-test-prev*"))
+        (host (generate-new-buffer " *tmux-test-host*")))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window)))
+            (set-window-buffer window prev)
+            (set-window-buffer window host)
+            (ghostel-tmux--hide-host window)
+            (should (eq (window-buffer window) host))
+            (with-current-buffer host
+              (setq-local ghostel-tmux--dcs-active t))
+            ;; Before Emacs 31 the hook runs in any buffer.
+            (with-temp-buffer
+              (ghostel-tmux--hide-host window))
+            (should (eq (window-buffer window) prev))
+            (should-not (assq host (window-prev-buffers window)))
+            ;; Where a pane is to replace it, and in a dedicated window,
+            ;; the host stays.
+            (set-window-buffer window host)
+            (with-current-buffer host
+              (setq-local ghostel-tmux--auto-host-window window))
+            (ghostel-tmux--hide-host window)
+            (should (eq (window-buffer window) host))
+            (with-current-buffer host
+              (setq-local ghostel-tmux--auto-host-window nil))
+            (set-window-dedicated-p window t)
+            (unwind-protect
+                (ghostel-tmux--hide-host window)
+              (set-window-dedicated-p window nil))
+            (should (eq (window-buffer window) host))))
+      (kill-buffer prev)
+      (kill-buffer host))))
+
+(ert-deftest ghostel-tmux-test-hide-host-runs-hooks-of-new-buffer ()
+  ;; Only the buffer-local ones: the global ones take a frame.
+  (let ((prev (generate-new-buffer "*tmux-test-prev*"))
+        (plain (generate-new-buffer "*tmux-test-plain*"))
+        (host (generate-new-buffer " *tmux-test-host*"))
+        (seen nil))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window))
+                (window-buffer-change-functions
+                 (list (lambda (arg) (push (cons 'global arg) seen)))))
+            (with-current-buffer prev
+              (add-hook 'window-buffer-change-functions
+                        (lambda (w) (push (cons (current-buffer) w) seen))
+                        nil t))
+            (with-current-buffer host
+              (setq-local ghostel-tmux--dcs-active t))
+            (set-window-buffer window prev)
+            (set-window-buffer window host)
+            (ghostel-tmux--hide-host window)
+            (should (equal seen (list (cons prev window))))
+            (set-window-buffer window plain)
+            (set-window-buffer window host)
+            (ghostel-tmux--hide-host window)
+            (should (eq (window-buffer window) plain))
+            (should (equal seen (list (cons prev window))))))
+      (kill-buffer prev)
+      (kill-buffer plain)
+      (kill-buffer host))))
+
+(ert-deftest ghostel-tmux-test-hide-host-with-nothing-to-show ()
+  ;; The host keeps the window, and its own hook is not run again.
+  (let ((host (generate-new-buffer " *tmux-test-host*"))
+        (global nil))
+    (unwind-protect
+        (save-window-excursion
+          (let ((window (selected-window))
+                (switch-to-prev-buffer-skip (lambda (&rest _) t))
+                (window-buffer-change-functions
+                 (list (lambda (arg) (push arg global)))))
+            (set-window-buffer window host)
+            (with-current-buffer host
+              (setq-local ghostel-tmux--dcs-active t)
+              (add-hook 'window-buffer-change-functions
+                        #'ghostel-tmux--hide-host nil t))
+            (ghostel-tmux--hide-host window)
+            (should (eq (window-buffer window) host))
+            (should-not global)))
+      (kill-buffer host))))
+
+(ert-deftest ghostel-tmux-test-exit-control-mode-gives-taken-identity-anew ()
+  ;; `ghostel' made a buffer with the host's identity while the host
+  ;; had none.
+  (let ((host (generate-new-buffer "*tmux-test-host-id*"))
+        (other (generate-new-buffer "*tmux-test-other-id*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer host
+            (ghostel-mode)
+            (setq ghostel-identity '((kind . term) (instance . 1))))
+          (ghostel-tmux--enter-control-mode host)
+          (with-current-buffer other
+            (ghostel-mode)
+            (setq ghostel-identity '((kind . term) (instance . 1))))
+          (ghostel-tmux--exit-control-mode host)
+          (should (equal (buffer-local-value 'ghostel-identity host)
+                         '((instance . 2) (kind . term))))
+          ;; Without an instance, an identity may be shared.
+          (with-current-buffer host
+            (setq ghostel-identity '((kind . exec) (command "htop"))))
+          (with-current-buffer other
+            (setq ghostel-identity '((kind . exec) (command "htop"))))
+          (ghostel-tmux--enter-control-mode host)
+          (ghostel-tmux--exit-control-mode host)
+          (should (equal (buffer-local-value 'ghostel-identity host)
+                         '((kind . exec) (command "htop")))))
+      (kill-buffer host)
+      (kill-buffer other))))
+
+(ert-deftest ghostel-tmux-test-takeover-drops-replies-before-marker ()
+  ;; Lines typed into the host before tmux took over get reply blocks
+  ;; of their own, before and after `%session-changed'.
+  (ghostel-tmux-test--with-host host
+    (let ((sent nil)
+          (rows nil))
+      (cl-letf (((symbol-function 'ghostel--write-pty)
+                 (lambda (_term data) (push data sent)))
+                ((symbol-function 'ghostel-tmux--receive-window-rows)
+                 (lambda (output _seed) (push output rows))))
+        (setq-local ghostel--term 'fake-term)
+        (setq ghostel-tmux--dcs-active t)
+        (ghostel-tmux--enter-control-mode host)
+        (ghostel-tmux-test--feed
+         host "%begin 1 1 1\r\nunknown command: ls\r\n%error 1 1 1\r\n")
+        (should ghostel-tmux--exit-reason)
+        (ghostel-tmux-test--feed host "%session-changed $1 s\r\n")
+        (ghostel-tmux--pump-deferred host)
+        (should-not ghostel-tmux--exit-reason)
+        ;; A line typed without RET joins the spare first line.
+        (should (equal sent (list (format "display-message -p ''\n\
+display-message -p %s\n"
+                                          ghostel-tmux--typed-reply-end))))
+        (ghostel-tmux-test--feed
+         host "%begin 2 2 1\r\nunknown command: pwd\r\n%error 2 2 1\r\n")
+        (ghostel-tmux--pump-deferred host)
+        (should (= (length sent) 1))
+        (ghostel-tmux-test--feed host ghostel-tmux-test--reply-end)
+        (ghostel-tmux--pump-deferred host)
+        (should (string-prefix-p "list-windows" (car sent)))
+        (ghostel-tmux-test--feed
+         host "%begin 3 3 1\r\n@1\t%1\t1\tw\tl\tl\r\n%end 3 3 1\r\n")
+        (should (equal rows '("@1\t%1\t1\tw\tl\tl")))))))
 
 (ert-deftest ghostel-tmux-test-send-bytes-from-pane-chunks-large ()
   ;; A paste larger than `--send-keys-chunk-bytes' must be split into
