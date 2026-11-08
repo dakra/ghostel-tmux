@@ -203,5 +203,40 @@ Pid 0 would be this Emacs's whole process group."
     (with-current-buffer host (ghostel-tmux-reset))
     t))
 
+(defun elate-tmux-split-windows ()
+  "Return the windows of the split of the selected window's tmux window."
+  (when-let* ((tile (window-parameter (selected-window) 'ghostel-tmux-tile)))
+    (ghostel-tmux--tile-windows (nth 0 tile) (nth 1 tile))))
+
+(defun elate-tmux-split-p (n)
+  "Non-nil when the selected window's split has N windows, each the size of its pane.
+Each window shows its pane, at the columns and rows tmux gives the pane."
+  (let ((windows (elate-tmux-split-windows)))
+    (and (= n (length windows))
+         (seq-every-p
+          (lambda (w)
+            (let* ((pid (nth 2 (window-parameter w 'ghostel-tmux-tile)))
+                   (buf (elate-tmux-pane pid)))
+              (and (eq (window-buffer w) buf)
+                   (equal (elate-tmux-q "#{pane_width}x#{pane_height}" (format "%%%d" pid))
+                          (format "%dx%d" (window-max-chars-per-line w)
+                                  (floor (with-selected-window w (window-screen-lines)))))
+                   (with-current-buffer buf
+                     (equal (cons ghostel--term-cols ghostel--term-rows)
+                            (cons (window-max-chars-per-line w)
+                                  (floor (with-selected-window w
+                                           (window-screen-lines)))))))))
+          windows))))
+
+(defun elate-tmux-active-p ()
+  "Non-nil when tmux's active pane is the one the selected window shows."
+  (when-let* ((b (elate-tmux-shown)))
+    (equal (elate-tmux-q "#{pane_id}" (elate-tmux-session b)) (elate-tmux-id b))))
+
+(defun elate-tmux-no-split-p ()
+  "Non-nil when no window is part of a split."
+  (not (seq-some (lambda (w) (window-parameter w 'ghostel-tmux-tile))
+                 (window-list-1 nil 'no-mini t))))
+
 (provide 'ghostel-tmux-setup)
 ;;; ghostel-tmux-setup.el ends here

@@ -40,6 +40,7 @@ test-elate:
 	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/takeover.json
 	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/panes.json
 	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/subprocess.json
+	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/splits.json
 
 lint: byte-compile package-lint checkdoc
 

@@ -5,8 +5,8 @@ tmux control mode for Emacs, built on [[https://github.com/dakra/ghostel][Ghoste
 =ghostel-tmux= connects to a tmux session via control mode (=tmux -CC=) and
 shows each tmux pane as a ghostel buffer: full VT engine, scrollback,
 isearch, occur, copy mode and evil integration all work on pane content.
-Switching panes is a buffer switch, with the sibling panes as tabs in the
-tab line.
+The panes of a tmux window are Emacs window splits, and the tmux windows are
+tabs in the tab line.
 
 * Requirements
 
@@ -40,7 +40,8 @@ With the mode on, a =tmux -CC new= or =tmux -CC attach= typed in a ghostel
 shell turns that shell's buffer into the controller.  This works in
 native-PTY, Emacs-PTY and TRAMP sessions alike, and for =tmux -CC attach=
 typed inside an ssh session.  The first pane shows up in the window the
-shell was in, sized to it, and the tab line lists the sibling panes.
+shell was in, sized to it, and the tab line lists the session's windows (its
+panes with =ghostel-tmux-split-windows= nil).
 While tmux is attached, what is typed in the shell buffer goes to tmux as
 commands, so a window switching to it shows its previous buffer instead,
 and =M-x ghostel= starts a new shell.
@@ -100,6 +101,7 @@ over the active session, so they work the same whether you started tmux via
 | =C-t %=        | =split-window -h=       | Split current pane vertically (new right).   |
 | =C-t c=        | =new-window=            | Create a new window.                         |
 | =C-t x=        | =kill-pane=             | Kill the current pane.                       |
+| =C-t z=        | =resize-pane -Z=        | Zoom the current pane, or unzoom (splits).   |
 | =C-t &=        | =kill-window=           | Kill the current window.                     |
 | =C-t n=        | =next-window=           | Cycle to the next window.                    |
 | =C-t p=        | =previous-window=       | Cycle to the previous window.                |
@@ -118,26 +120,67 @@ over the active session, so they work the same whether you started tmux via
 The map is =ghostel-tmux-prefix-map=; rebind individual keys however you like.
 With =repeat-mode=, =C-n= and =C-p= repeat after =C-t C-n= or =C-t C-p=.
 
+* Split windows
+
+A tmux window of several panes shows them all at once: the Emacs window
+showing one of its panes is split to match tmux's layout, and tmux lays the
+panes out in that window's size.  Windows beside it stay as they are.  A
+split from Emacs (=C-t %=, =C-t "=), from another client or from a command
+such as =select-layout= splits the Emacs window too, and each layout tmux
+settles on moves the window edges to its pane sizes.
+
+Selecting a window of the split makes its pane tmux's active pane, and a pane
+tmux makes active (=C-t o=, another client) gets the selection while a window
+of the split has it.  Switching tmux windows (=C-t n=, =C-t 1=) shows the
+other window in the place of the split.
+
+Dragging a divider or a mode line between windows of the split, or resizing
+one with =C-x {= and the like, resizes the pane in tmux.
+
+=C-t z= zooms the current pane to the whole split, and shows all panes of its
+window again.  Deleting all windows of a split but one (=C-x 1=) zooms its
+pane, and deleting some builds the split again.  A window of the split can
+show another buffer for a while and keeps its place until tmux
+changes the window's layout, and a window split off
+one of its windows (=C-x 3=) gets a place beside the split.
+
+tmux has one size per client, for all windows of its session: of two splits
+of one session shown at once, the one not of the current tmux window shows
+its panes at the other's size, and a divider dragged in it snaps back.
+
+With =ghostel-tmux-split-windows= nil, an Emacs window shows one pane, which
+tmux zooms when its window has several.
+
 * Tab line
 
-Each pane buffer enables =tab-line-mode= and lists the session's other panes as
-tabs.  Click a tab - or hit =C-t C-n= / =C-t C-p= - to switch panes in the same
-window.
+Pane buffers have a tab line with a tab per tmux window.  Click a tab to show
+that window in the Emacs window clicked, or where Emacs shows it already, or
+hit =C-t n= / =C-t p=.  A split has one tab line over its top row of windows,
+each showing its part, and no tab line further down.  =C-t C-n= / =C-t C-p=
+and =C-t s= go to a pane of any window.
+
+With =ghostel-tmux-split-windows= nil, the tabs are the session's panes, and a
+click switches panes in the same window.
 
 * Sizing
 
 A pane's terminal follows the Emacs windows showing it, like any ghostel
 buffer.  Each new size is sent to tmux with =refresh-client -C cols,rows=,
-so the server lays the panes out for the real client size.
+so the server lays the panes out for the real client size.  For a split, the
+size is what the split windows show, with the column or row tmux puts
+between panes, and each pane keeps the size tmux gives it.  Where Emacs
+spends more between two windows than tmux's separator, such as two borders
+in a nested split, the window beside them can have a column or row more
+than its pane.
 
 * Floating panes
 
 The floating panes of tmux 3.8 (=new-pane=, =break-pane -W=) are in no window
 layout, so they get no buffer, and a pane that turns floating loses its buffer.
-With a floating pane active, Emacs keeps the tiled pane it shows, or shows the
-window's first tiled pane.  In a window with several tiled panes it zooms that
-pane, which takes the selection from the floating pane and hides it from other
-clients too.
+With a floating pane active, Emacs keeps the tiled panes it shows, or shows the
+window's first tiled pane.  With =ghostel-tmux-split-windows= nil, in a window
+with several tiled panes it zooms that pane, which takes the selection from the
+floating pane and hides it from other clients too.
 
 A current window that holds only floating panes has nothing to show.  On attach,
 on takeover and when the pane shown goes away, Emacs moves the session to a
@@ -150,6 +193,7 @@ at all stays on the hidden shell.
 |-------------------------------------+-------------------------------------------------------------------------------------|
 | =ghostel-tmux-program=                | tmux executable.  Default ="tmux"=.                                                  |
 | =ghostel-tmux-prefix-key=             | Prefix key in pane buffers.  Default ="C-t"=.                                        |
+| =ghostel-tmux-split-windows=          | Show the panes of a tmux window as Emacs splits.  Default =t=.                       |
 | =ghostel-tmux-history-lines=          | Scrollback lines to backfill via =capture-pane= on attach.  Default =10000=.          |
 | =ghostel-tmux-default-rows= / =-cols=   | Initial pane terminal size before the layout-resize fires.  Default =40= x =120=.     |
 | =ghostel-tmux-buffer-name-function=   | Customize pane buffer naming.  Called with =(SESSION WINDOW PANE-ID)=.               |
@@ -168,8 +212,9 @@ server under =/tmp/ghostel-tmux-elate-*=.
 | Scenario                     | Covers                                                                   |
 |------------------------------+--------------------------------------------------------------------------|
 | =test/elate/takeover.json=     | =tmux -CC= in a shell, per host shell and PTY backend, and every way out.  |
-| =test/elate/panes.json=        | Keys, splits, switching, windows, scrollback, a second client, closing.  |
-| =test/elate/subprocess.json=   | =ghostel-tmux-attach=, =ghostel-tmux-new= and =ghostel-tmux-capture=.          |
+| =test/elate/panes.json=        | Keys, splits, switching, windows, scrollback, a second client, closing, with one pane per Emacs window. |
+| =test/elate/subprocess.json=   | =ghostel-tmux-attach=, =ghostel-tmux-new= and =ghostel-tmux-capture=, with one pane per Emacs window. |
+| =test/elate/splits.json=       | Panes as Emacs splits: selection, zoom, resizing, switching windows, closing. |
 
 One variant of one scenario:
 

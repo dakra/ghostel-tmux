@@ -1,6 +1,6 @@
 {
   "name": "panes",
-  "comment": "Working in a tmux session by keyboard and mouse: typing, splits, switching, windows, a full-screen program, scrollback, a second client, closing, leaving. The variants differ in how the session is entered: `params' is the takeover from a shell, `new' overrides it with M-x ghostel-tmux-new.",
+  "comment": "Working in a tmux session by keyboard and mouse, one pane per Emacs window (`ghostel-tmux-split-windows' off): typing, splits, switching, windows, a full-screen program, scrollback, a second client, closing, leaving. The variants differ in how the session is entered: `params' is the takeover from a shell, `new' overrides it with M-x ghostel-tmux-new.",
   "params": {
     "enter": "(ghostel)",
     "ready": "(elate-tmux-prompt-p)",
@@ -22,6 +22,7 @@
     "load": ["lib/ghostel-tmux-setup.el"],
     "eval": [
       "(elate-tmux-init \"panes-{{variant}}\" \"{{shell}}\" {{native}})",
+      "(setq ghostel-tmux-split-windows nil)",
       "(ghostel-tmux-takeover-mode 1)"
     ]
   },

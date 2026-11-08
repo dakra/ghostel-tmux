@@ -191,7 +191,47 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-layout-empty-returns-nil ()
   (should (null (ghostel-tmux--parse-layout nil)))
-  (should (null (ghostel-tmux--parse-layout ""))))
+  (should (null (ghostel-tmux--parse-layout "")))
+  ;; A window of floating panes only.
+  (should (null (ghostel-tmux--parse-layout "0000,")))
+  (should (null (ghostel-tmux--parse-layout-tree "0000,"))))
+
+(ert-deftest ghostel-tmux-test-layout-tree-leaf ()
+  (should (equal (ghostel-tmux--parse-layout-tree "bd5b,80x24,0,0,7")
+                 '(pane 80 24 0 0 7))))
+
+(ert-deftest ghostel-tmux-test-layout-tree-nested ()
+  "Side by side is `h', stacked is `v', children in tmux's order."
+  (should (equal (ghostel-tmux--parse-layout-tree
+                  "abcd,80x24,0,0{40x24,0,0,1,39x24,41,0[39x12,41,0,2,39x11,41,13,3]}")
+                 '(h 80 24 0 0
+                     ((pane 40 24 0 0 1)
+                      (v 39 24 41 0
+                         ((pane 39 12 41 0 2)
+                          (pane 39 11 41 13 3))))))))
+
+(ert-deftest ghostel-tmux-test-layout-tree-three-way ()
+  (should (equal (ghostel-tmux--parse-layout-tree
+                  "abcd,80x24,0,0[80x8,0,0,1,80x7,0,9,2,80x7,0,17,3]")
+                 '(v 80 24 0 0
+                     ((pane 80 8 0 0 1)
+                      (pane 80 7 0 9 2)
+                      (pane 80 7 0 17 3))))))
+
+(ert-deftest ghostel-tmux-test-layout-tree-row-in-column ()
+  (should (equal (ghostel-tmux--parse-layout-tree
+                  "abcd,80x24,0,0[80x12,0,0{40x12,0,0,1,39x12,41,0,2},80x11,0,13,3]")
+                 '(v 80 24 0 0
+                     ((h 80 12 0 0
+                         ((pane 40 12 0 0 1)
+                          (pane 39 12 41 0 2)))
+                      (pane 80 11 0 13 3))))))
+
+(ert-deftest ghostel-tmux-test-layout-tree-malformed-signals ()
+  (should-error (ghostel-tmux--parse-layout-tree "abcd,80x24,0,0{40x24,0,0,1"))
+  (should-error (ghostel-tmux--parse-layout-tree
+                 "abcd,80x24,0,0{40x24,0,0,1,39x24,41,0,2]"))
+  (should-error (ghostel-tmux--parse-layout-tree "abcd,80x24,0,0;1")))
 
 ;; ---------------------------------------------------------------------------
 ;; Hex encoding for send-keys -H
@@ -1158,7 +1198,7 @@ fills its output queue between the two repeats the CR."
   (ghostel-tmux-test--with-controller ctl
     (let ((followed nil))
       (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                 (lambda (pid) (push pid followed))))
+                 (lambda (pid &rest _) (push pid followed))))
         (with-current-buffer ctl
           (setq ghostel-tmux--current-window-id 7)
           (ghostel-tmux--on-window-pane-changed 7 42))
@@ -1172,7 +1212,7 @@ fills its output queue between the two repeats the CR."
   (ghostel-tmux-test--with-controller ctl
     (let ((followed nil))
       (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                 (lambda (pid) (push pid followed))))
+                 (lambda (pid &rest _) (push pid followed))))
         (puthash 3 (list :name "bg" :panes (list 8 9) :active-pane 8)
                  ghostel-tmux--windows)
         (setq ghostel-tmux--current-window-id 2
@@ -1188,7 +1228,7 @@ fills its output queue between the two repeats the CR."
   (ghostel-tmux-test--with-controller ctl
     (let ((followed nil))
       (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                 (lambda (pid) (push pid followed))))
+                 (lambda (pid &rest _) (push pid followed))))
         (setq ghostel-tmux--current-window-id 2
               ghostel-tmux--active-pane-id 5)
         (ghostel-tmux--on-window-pane-changed 40 41)
@@ -1313,7 +1353,7 @@ fills its output queue between the two repeats the CR."
                     ((symbol-function 'get-buffer-window-list)
                      (lambda (&rest _) nil))
                     ((symbol-function 'ghostel-tmux--follow-active-pane)
-                     (lambda (pid) (push pid followed))))
+                     (lambda (pid &rest _) (push pid followed))))
             (with-current-buffer ctl
               (setq ghostel-tmux--current-window-id 0)
               (ghostel-tmux--on-window-pane-changed 0 99)
@@ -1378,7 +1418,7 @@ fills its output queue between the two repeats the CR."
         (resized nil))
     (unwind-protect
         (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
-                   (lambda (b w) (push (cons b w) resized))))
+                   (lambda (b w &rest _) (push (cons b w) resized))))
           (with-current-buffer buf
             (ghostel-tmux-pane-mode 1)
             (setq-local ghostel-tmux--controller-buffer buf)
@@ -1397,7 +1437,7 @@ fills its output queue between the two repeats the CR."
         (resized nil))
     (unwind-protect
         (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
-                   (lambda (b w) (push (cons b w) resized))))
+                   (lambda (b w &rest _) (push (cons b w) resized))))
           (with-current-buffer buf
             (setq-local ghostel-tmux--controller-buffer buf))
           (with-temp-buffer
@@ -1415,7 +1455,7 @@ fills its output queue between the two repeats the CR."
         (resized nil))
     (unwind-protect
         (cl-letf (((symbol-function 'ghostel-tmux--apply-pane-size)
-                   (lambda (b w) (push (cons b w) resized))))
+                   (lambda (b w &rest _) (push (cons b w) resized))))
           (with-current-buffer buf
             (setq-local ghostel-tmux--controller-buffer buf))
           (with-temp-buffer
@@ -2816,96 +2856,103 @@ SENT collects the sent lines, newest first."
 
 (ert-deftest ghostel-tmux-test-rezoom-shown-pane-when-unzoomed ()
   "An unzoomed window of the pane shown is zoomed again."
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil))
-      (ghostel-tmux-test--with-wire ctl sent
-        (ghostel-tmux-test--with-shown-pane ctl _pane
-          (ghostel-tmux--rezoom-shown-pane 0 "*")
-          (should (equal sent (list ghostel-tmux-test--zoom-query))))))))
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--with-shown-pane ctl _pane
+            (ghostel-tmux--rezoom-shown-pane 0 "*")
+            (should (equal sent (list ghostel-tmux-test--zoom-query)))))))))
 
 (ert-deftest ghostel-tmux-test-rezoom-skips-zoomed-window ()
   "A window zoomed already costs no query."
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil))
-      (ghostel-tmux-test--with-wire ctl sent
-        (ghostel-tmux-test--with-shown-pane ctl _pane
-          (ghostel-tmux--rezoom-shown-pane 0 "*Z")
-          (should-not sent))))))
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--with-shown-pane ctl _pane
+            (ghostel-tmux--rezoom-shown-pane 0 "*Z")
+            (should-not sent)))))))
 
 (ert-deftest ghostel-tmux-test-rezoom-skips-other-windows ()
   "Only the current window of the session is zoomed."
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil))
-      (ghostel-tmux-test--with-wire ctl sent
-        (ghostel-tmux-test--with-shown-pane ctl _pane
-          (setq ghostel-tmux--current-window-id 1)
-          (ghostel-tmux--rezoom-shown-pane 0 "*")
-          (should-not sent))))))
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--with-shown-pane ctl _pane
+            (setq ghostel-tmux--current-window-id 1)
+            (ghostel-tmux--rezoom-shown-pane 0 "*")
+            (should-not sent)))))))
 
 (ert-deftest ghostel-tmux-test-rezoom-skips-hidden-pane ()
   "A pane no window shows needs no zoom."
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil))
-      (ghostel-tmux-test--with-wire ctl sent
-        (ghostel-tmux-test--with-shown-pane ctl _pane
-          (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
-          (ghostel-tmux--rezoom-shown-pane 0 "*")
-          (should-not sent))))))
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--with-shown-pane ctl _pane
+            (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+            (ghostel-tmux--rezoom-shown-pane 0 "*")
+            (should-not sent)))))))
 
 (ert-deftest ghostel-tmux-test-rezoom-skips-pane-of-another-window ()
   "A pane on its way into the window, which it does not list yet, waits."
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil))
-      (ghostel-tmux-test--with-wire ctl sent
-        (ghostel-tmux-test--with-shown-pane ctl _pane
-          (puthash 0 (list :name "w" :panes (list 6 7)) ghostel-tmux--windows)
-          (ghostel-tmux--rezoom-shown-pane 0 "*")
-          (should-not sent))))))
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--with-shown-pane ctl _pane
+            (puthash 0 (list :name "w" :panes (list 6 7)) ghostel-tmux--windows)
+            (ghostel-tmux--rezoom-shown-pane 0 "*")
+            (should-not sent)))))))
 
 (ert-deftest ghostel-tmux-test-layout-change-rezooms-shown-pane ()
   "A layout without the zoom flag zooms the pane shown, one with it does not."
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil)
-          (layout "aaaa,80x24,0,0[80x12,0,0,5,80x11,0,13,6]")
-          (other (generate-new-buffer "*ghostel-tmux:s:w%6*")))
-      (ghostel-tmux-test--with-wire ctl sent
-        (ghostel-tmux-test--with-shown-pane ctl pane
-          (unwind-protect
-              (progn
-                (puthash 6 other ghostel-tmux--panes)
-                (dolist (buf (list pane other))
-                  (with-current-buffer buf
-                    (setq ghostel-tmux--initialized t)))
-                (ghostel-tmux-test--feed
-                 ctl (format "%%layout-change @0 %s bbbb,80x24,0,0,5 *Z\r\n" layout))
-                (ghostel-tmux--pump-deferred ctl)
-                (should-not sent)
-                (ghostel-tmux-test--feed
-                 ctl (format "%%layout-change @0 %s %s *\r\n" layout layout))
-                (ghostel-tmux--pump-deferred ctl)
-                (should (equal sent (list ghostel-tmux-test--zoom-query))))
-            (kill-buffer other)))))))
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil)
+            (layout "aaaa,80x24,0,0[80x12,0,0,5,80x11,0,13,6]")
+            (other (generate-new-buffer "*ghostel-tmux:s:w%6*")))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--with-shown-pane ctl pane
+            (unwind-protect
+                (progn
+                  (puthash 6 other ghostel-tmux--panes)
+                  (dolist (buf (list pane other))
+                    (with-current-buffer buf
+                      (setq ghostel-tmux--initialized t)))
+                  (ghostel-tmux-test--feed
+                   ctl (format "%%layout-change @0 %s bbbb,80x24,0,0,5 *Z\r\n" layout))
+                  (ghostel-tmux--pump-deferred ctl)
+                  (should-not sent)
+                  (ghostel-tmux-test--feed
+                   ctl (format "%%layout-change @0 %s %s *\r\n" layout layout))
+                  (ghostel-tmux--pump-deferred ctl)
+                  (should (equal sent (list ghostel-tmux-test--zoom-query))))
+              (kill-buffer other))))))))
 
 (ert-deftest ghostel-tmux-test-reported-pane-replaces-pending-rezoom ()
   "A selection tmux reports stands, also for a pane another window shows.
 tmux sends the layout that unzooms before the report of the selection."
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil) (other (generate-new-buffer "*ghostel-tmux:s:w%6*")))
-      (ghostel-tmux-test--with-wire ctl sent
-        (ghostel-tmux-test--with-shown-pane ctl _pane
-          (unwind-protect
-              (progn
-                (set-window-buffer (split-window) other)
-                (puthash 6 other ghostel-tmux--panes)
-                (ghostel-tmux--rezoom-shown-pane 0 "*")
-                (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
-                (ghostel-tmux-test--reply ctl "0\r\n")
-                (should (equal (car sent)
-                               "display-message -p -t %6 '#{window_zoomed_flag}'\n"))
-                (ghostel-tmux-test--reply ctl "0\r\n")
-                (should (equal (car sent) "resize-pane -Z -t %6\n"))
-                (should-not (member "resize-pane -Z -t %5\n" sent)))
-            (kill-buffer other)))))))
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil) (other (generate-new-buffer "*ghostel-tmux:s:w%6*")))
+        (ghostel-tmux-test--with-wire ctl sent
+          (ghostel-tmux-test--with-shown-pane ctl _pane
+            (unwind-protect
+                (progn
+                  (set-window-buffer (split-window) other)
+                  (puthash 6 other ghostel-tmux--panes)
+                  (ghostel-tmux--rezoom-shown-pane 0 "*")
+                  (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+                  (ghostel-tmux-test--reply ctl "0\r\n")
+                  (should (equal (car sent)
+                                 "display-message -p -t %6 '#{window_zoomed_flag}'\n"))
+                  (ghostel-tmux-test--reply ctl "0\r\n")
+                  (should (equal (car sent) "resize-pane -Z -t %6\n"))
+                  (should-not (member "resize-pane -Z -t %5\n" sent)))
+              (kill-buffer other))))))))
 
 (ert-deftest ghostel-tmux-test-layout-change-passes-flags ()
   "The flags field of `%layout-change' reaches the handler."
@@ -3142,7 +3189,7 @@ tmux sends the layout that unzooms before the report of the selection."
                          (setq-local ghostel-tmux--initialized t))
                        b))
                     ((symbol-function 'ghostel-tmux--follow-active-pane)
-                     (lambda (pid) (push pid followed))))
+                     (lambda (pid &rest _) (push pid followed))))
             (puthash 5 a ghostel-tmux--panes)
             (puthash 0 (list :name "w" :panes (list 5) :active-pane 5)
                      ghostel-tmux--windows)
@@ -3170,7 +3217,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
                         (setq-local ghostel-tmux--initialized t))
                       pane))
                    ((symbol-function 'ghostel-tmux--follow-active-pane)
-                    (lambda (pid) (push pid ,(car spec)))))
+                    (lambda (pid &rest _) (push pid ,(car spec)))))
            (setq ghostel-tmux--session-id 1)
            (ghostel-tmux--on-session-window-changed 1 3)
            ,@body)
@@ -3333,7 +3380,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
           (b (generate-new-buffer "*swc-b*")))
       (unwind-protect
           (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                     (lambda (pid) (push pid followed))))
+                     (lambda (pid &rest _) (push pid followed))))
             (ghostel-tmux-test--with-sent ctl sent
               (puthash 5 a ghostel-tmux--panes)
               (puthash 6 b ghostel-tmux--panes)
@@ -3355,7 +3402,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
           (a (generate-new-buffer "*swc-a*")))
       (unwind-protect
           (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                     (lambda (pid) (push pid followed))))
+                     (lambda (pid &rest _) (push pid followed))))
             (ghostel-tmux-test--with-sent ctl sent
               (puthash 5 a ghostel-tmux--panes)
               (puthash 0 (list :name "w" :panes (list 5 6))
@@ -3375,7 +3422,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
           (b (generate-new-buffer "*join-b*")))
       (unwind-protect
           (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                     (lambda (pid) (push pid followed)))
+                     (lambda (pid &rest _) (push pid followed)))
                     ((symbol-function 'ghostel-tmux--get-or-create-pane)
                      (lambda (_ctl pid _wid _name)
                        (with-current-buffer (gethash pid ghostel-tmux--panes)
@@ -3438,7 +3485,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
     (ghostel-tmux-test--with-floating-active-pane
       (let (followed)
         (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                   (lambda (pid) (push pid followed))))
+                   (lambda (pid &rest _) (push pid followed))))
           (setq ghostel-tmux--pending-follow-wid 0)
           (ghostel-tmux--on-layout-change 0 "b25d,80x24,0,0,5")
           (should-not ghostel-tmux--pending-follow-wid)
@@ -3449,7 +3496,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
     (ghostel-tmux-test--with-floating-active-pane
       (let ((sent nil) (followed nil))
         (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                   (lambda (pid) (push pid followed))))
+                   (lambda (pid &rest _) (push pid followed))))
           (ghostel-tmux-test--with-sent ctl sent
             (ghostel-tmux--on-session-window-changed 1 0))
           (should (equal followed '(5)))
@@ -3479,7 +3526,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
             (followed nil))
         (unwind-protect
             (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                       (lambda (pid) (push pid followed))))
+                       (lambda (pid &rest _) (push pid followed))))
               (ghostel-tmux--on-session-window-changed 1 0)
               (should (eql ghostel-tmux--pending-follow-wid 0))
               (puthash 9 joined ghostel-tmux--panes)
@@ -3775,7 +3822,7 @@ SPEC is (FOLLOWED): that variable collects followed panes."
           (a (generate-new-buffer "*swc-a*")))
       (unwind-protect
           (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-                     (lambda (pid) (push pid followed))))
+                     (lambda (pid &rest _) (push pid followed))))
             (puthash 5 a ghostel-tmux--panes)
             (puthash 0 (list :name "w" :panes (list 5) :active-pane 5)
                      ghostel-tmux--windows)
@@ -4367,7 +4414,7 @@ display-message -p %s\n"
 (ert-deftest ghostel-tmux-test-lost-pane-answer-after-report-does-nothing ()
   (ghostel-tmux-test--with-controller ctl
     (cl-letf (((symbol-function 'ghostel-tmux--follow-active-pane)
-               (lambda (_) (error "Followed"))))
+               (lambda (&rest _) (error "Followed"))))
       (setq ghostel-tmux--active-pane-id 6)
       (ghostel-tmux--receive-active-pane "%7")
       (should (eql ghostel-tmux--active-pane-id 6)))))
@@ -4491,6 +4538,848 @@ display-message -p %s\n"
           (ghostel-tmux-capture "s:0.0")
           (should (equal fed "one\r\ntwo")))
       (when (buffer-live-p buf) (kill-buffer buf)))))
+
+;; ---------------------------------------------------------------------------
+;; Tiles
+;; ---------------------------------------------------------------------------
+
+(defmacro ghostel-tmux-test--with-tile (ctl pids layout sent &rest body)
+  "Run BODY in controller CTL of window @0 with panes PIDS laid out as LAYOUT.
+The selected window, alone in the frame, shows the first pane.  SENT
+collects the lines sent, newest first.  The panes are plain buffers."
+  (declare (indent 4))
+  `(ghostel-tmux-test--with-controller ,ctl
+     (let ((,sent nil)
+           (bufs nil)
+           (ghostel-tmux--tiles-exist nil)
+           (ghostel-tmux--tile-timer nil))
+       (unwind-protect
+           (save-window-excursion
+             (delete-other-windows)
+             (set-window-parameter (selected-window) 'ghostel-tmux-tile nil)
+             (dolist (pid ,pids)
+               (let ((buf (generate-new-buffer (format "*ghostel-tmux:s:w%%%d*" pid))))
+                 (with-current-buffer buf
+                   (setq-local ghostel-tmux--controller-buffer ,ctl)
+                   (setq-local ghostel-tmux--pane-id pid)
+                   (setq-local ghostel-tmux--window-id 0))
+                 (push buf bufs)
+                 (puthash pid buf ghostel-tmux--panes)))
+             (setq bufs (nreverse bufs))
+             (puthash 0 (list :name "w" :panes ,pids
+                              :tree (ghostel-tmux--parse-layout-tree ,layout))
+                      ghostel-tmux--windows)
+             (setq ghostel-tmux--controller-process 'fake-proc
+                   ghostel-tmux--parser-state 'idle
+                   ghostel-tmux--current-window-id 0
+                   ghostel-tmux--active-pane-id (car ,pids))
+             (set-window-buffer (selected-window) (car bufs))
+             (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                       ((symbol-function 'process-send-string)
+                        (lambda (_p s) (push s ,sent)))
+                       ((symbol-function 'run-at-time) #'ignore))
+               ,@body))
+         (mapc #'kill-buffer bufs)))))
+
+(defun ghostel-tmux-test--tile-pids (ctl)
+  "Return the panes of the tile of CTL's window @0, top left first."
+  (mapcar (lambda (w) (nth 2 (window-parameter w 'ghostel-tmux-tile)))
+          (ghostel-tmux--tile-windows ctl 0)))
+
+(ert-deftest ghostel-tmux-test-layout-capacity-counts-separators ()
+  "Side by side, tmux puts a column between the parts; stacked, a row."
+  (let ((tree (ghostel-tmux--parse-layout-tree
+               "abcd,80x24,0,0{40x24,0,0,1,39x24,41,0[39x12,41,0,2,39x11,41,13,3]}")))
+    (should (equal (ghostel-tmux--layout-capacity tree #'ignore) '(80 . 24)))))
+
+(ert-deftest ghostel-tmux-test-layout-prune-drops-panes ()
+  (let ((tree (ghostel-tmux--parse-layout-tree
+               "abcd,80x24,0,0{40x24,0,0,1,39x24,41,0[39x12,41,0,2,39x11,41,13,3]}")))
+    (should (equal (ghostel-tmux--layout-prune tree (lambda (pid) (/= pid 2)))
+                   '(h 80 24 0 0 ((pane 40 24 0 0 1) (pane 39 11 41 13 3)))))
+    (should (equal (ghostel-tmux--layout-prune tree (lambda (pid) (= pid 3)))
+                   '(pane 39 11 41 13 3)))
+    (should-not (ghostel-tmux--layout-prune tree #'ignore))))
+
+(ert-deftest ghostel-tmux-test-tile-build-splits-to-layout ()
+  "A tile shows every pane, each at its tmux width, and selects the active one."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (setq ghostel-tmux--active-pane-id 6)
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (should (eq (window-buffer (car windows)) (gethash 5 ghostel-tmux--panes)))
+      (should (eq (window-buffer (cadr windows)) (gethash 6 ghostel-tmux--panes)))
+      (should (= (window-max-chars-per-line (car windows)) 39))
+      (should (eq (selected-window) (cadr windows))))
+    (should (equal (plist-get (gethash 0 ghostel-tmux--windows) :tiled) '(5 6)))))
+
+(ert-deftest ghostel-tmux-test-tile-sync-size-reports-the-terminal-area ()
+  "The tile reports what its windows show, with tmux's separators."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let* ((windows (ghostel-tmux--tile-windows ctl 0))
+           (cols (+ (window-max-chars-per-line (car windows)) 1
+                    (window-max-chars-per-line (cadr windows))))
+           (rows (floor (with-selected-window (car windows) (window-screen-lines)))))
+      (should (ghostel-tmux--tile-sync-size 0))
+      (should (equal (car sent) (format "refresh-client -C %d,%d\n" cols rows)))
+      ;; The same size is not sent again.
+      (setq sent nil)
+      (should-not (ghostel-tmux--tile-sync-size 0))
+      (should-not sent))))
+
+(ert-deftest ghostel-tmux-test-tile-build-fits-a-small-window ()
+  "A layout bigger than the window still shows each pane, and spares a neighbour."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,200x50,0,0{100x50,0,0,5,99x50,101,0,6}" sent
+    (let ((foreign (split-window (selected-window) 50 'right)))
+      (set-window-buffer foreign (get-buffer-create "*scratch*"))
+      (ghostel-tmux--tile-build 0 (selected-window))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))
+      (should (= (window-total-width foreign) 30)))))
+
+(ert-deftest ghostel-tmux-test-tile-fit-stacked ()
+  "Stacked panes get tmux's rows."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x22,0,0[79x6,0,0,5,79x15,0,7,6]" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((top (car (ghostel-tmux--tile-windows ctl 0))))
+      (should (= (floor (with-selected-window top (window-screen-lines))) 6)))))
+
+(ert-deftest ghostel-tmux-test-tile-check-keeps-a-window-showing-another-buffer ()
+  "A tile window showing another buffer keeps its place; nothing is zoomed."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (setq sent nil)
+    (set-window-buffer (car (ghostel-tmux--tile-windows ctl 0))
+                       (get-buffer-create "*scratch*"))
+    (ghostel-tmux--tile-check)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))
+    (should-not (cl-find-if (lambda (line) (string-match-p "zoomed" line)) sent))))
+
+(ert-deftest ghostel-tmux-test-tile-check-zooms-a-lone-window ()
+  "A tile left with one window of several panes zooms that pane."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (delete-window (car (ghostel-tmux--tile-windows ctl 0)))
+    (ghostel-tmux--tile-check)
+    (should (equal (car sent) "display-message -p -t %6 '#{window_zoomed_flag}'\n"))))
+
+(ert-deftest ghostel-tmux-test-tile-check-waits-for-the-layout ()
+  "A tile whose layout is on its way is not built again."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :settling t)
+             ghostel-tmux--windows)
+    (delete-window (car (last (ghostel-tmux--tile-windows ctl 0))))
+    (ghostel-tmux--tile-check)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))))
+
+(ert-deftest ghostel-tmux-test-tile-collapse-keeps-the-current-buffer ()
+  "Deleting the selected window of a tile leaves the current buffer alone."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (select-window (car windows))
+      (set-buffer ctl)
+      (ghostel-tmux--tile-collapse windows (cadr windows))
+      (should (eq (current-buffer) ctl)))))
+
+(ert-deftest ghostel-tmux-test-tile-update-rebuilds-a-new-shape ()
+  "A layout of another shape builds the tile again in its space."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :tree
+                          (ghostel-tmux--parse-layout-tree
+                           "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}"))
+             ghostel-tmux--windows)
+    (ghostel-tmux--tile-update 0)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6 7)))
+    (should (= (length (window-list nil 'no-mini)) 3))))
+
+(ert-deftest ghostel-tmux-test-tile-update-zoomed-window-is-one-pane ()
+  "The visible layout of a zoomed window collapses the tile to its pane."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :tree
+                          (ghostel-tmux--parse-layout-tree "bbbb,79x23,0,0,6"))
+             ghostel-tmux--windows)
+    (ghostel-tmux--tile-update 0)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(6)))
+    (should (= (length (window-list nil 'no-mini)) 1))))
+
+(ert-deftest ghostel-tmux-test-tile-update-splits-a-shown-pane ()
+  "A split of the window a pane shows builds a tile there."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-update 0)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))))
+
+(ert-deftest ghostel-tmux-test-tile-update-leaves-hidden-window ()
+  "A tmux window no Emacs window shows gets no tile."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+    (ghostel-tmux--tile-update 0)
+    (should-not (ghostel-tmux--tile-windows ctl 0))
+    (should (= (length (window-list nil 'no-mini)) 1))))
+
+(ert-deftest ghostel-tmux-test-tile-check-rebuilds-after-a-deleted-window ()
+  "A tile of three that lost a window is built again."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (delete-window (car (last (ghostel-tmux--tile-windows ctl 0))))
+    (ghostel-tmux--tile-check)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6 7)))))
+
+(ert-deftest ghostel-tmux-test-a-closed-tmux-window-collapses-its-tile ()
+  "A tmux window closed while its tile is shown leaves one window."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (setq ghostel-tmux--current-window-id 1)
+    (ghostel-tmux--drop-window 0)
+    (should (= 1 (length (window-list nil 'no-mini))))
+    (should-not (window-parameter (selected-window) 'ghostel-tmux-tile))))
+
+(ert-deftest ghostel-tmux-test-a-tab-of-the-selected-tile-keeps-the-selection ()
+  "Clicking the tab of the tile the selected window is part of selects nothing."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (select-window (nth 1 windows))
+      (set-buffer ctl)
+      (setq ghostel-tmux--current-window-id 1)
+      (ghostel-tmux--show-tmux-window 0 (nth 0 windows))
+      (should (eq (selected-window) (nth 1 windows))))))
+
+(ert-deftest ghostel-tmux-test-turning-splits-off-collapses-the-tiles ()
+  "A new `ghostel-tmux-split-windows' applies to the windows shown."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((ghostel-tmux-split-windows nil)
+          (zoomed nil))
+      (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore)
+                ((symbol-function 'ghostel-tmux--ensure-pane-zoomed)
+                 (lambda (_wid pid) (push pid zoomed))))
+        (ghostel-tmux--split-windows-changed))
+      (should (= 1 (length (window-list nil 'no-mini))))
+      (should-not (window-parameter (selected-window) 'ghostel-tmux-tile))
+      (should zoomed))))
+
+(ert-deftest ghostel-tmux-test-tile-keeps-foreign-window ()
+  "A window beside the tile survives building and collapsing it."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,59x23,0,0{29x23,0,0,5,29x23,30,0,6}" sent
+    (let ((foreign (split-window (selected-window) 60 'right)))
+      (set-window-buffer foreign (get-buffer-create "*scratch*"))
+      (ghostel-tmux--tile-build 0 (selected-window))
+      (should (= (length (window-list nil 'no-mini)) 3))
+      (ghostel-tmux--tile-collapse (ghostel-tmux--tile-windows ctl 0))
+      (should (window-live-p foreign))
+      (should (= (length (window-list nil 'no-mini)) 2)))))
+
+(ert-deftest ghostel-tmux-test-display-collapses-another-windows-tile ()
+  "Showing a pane of another tmux window in a tile window collapses the tile."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((other (generate-new-buffer "*ghostel-tmux:s:x%9*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer other
+              (setq-local ghostel-tmux--controller-buffer ctl)
+              (setq-local ghostel-tmux--pane-id 9)
+              (setq-local ghostel-tmux--window-id 1))
+            (puthash 9 other ghostel-tmux--panes)
+            (puthash 1 (list :name "x" :panes '(9)
+                             :tree (ghostel-tmux--parse-layout-tree "cccc,79x23,0,0,9"))
+                     ghostel-tmux--windows)
+            (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore))
+              (ghostel-tmux--display-pane-in-window other (selected-window)))
+            (should-not (ghostel-tmux--tile-windows ctl 0))
+            (should (= (length (window-list nil 'no-mini)) 1))
+            (should (eq (window-buffer (selected-window)) other)))
+        (kill-buffer other)))))
+
+(ert-deftest ghostel-tmux-test-layout-change-of-a-tile-asks-for-the-layout ()
+  "A tile follows the visible layout tmux answers, not the one it reported.
+tmux resizing a zoomed window reports it unzoomed on the way."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (dolist (pid '(5 6))
+      (with-current-buffer (gethash pid ghostel-tmux--panes)
+        (setq ghostel-tmux--initialized t)))
+    ;; The tile's size is known to tmux already.
+    (ghostel-tmux--tile-sync-size 0)
+    (ghostel-tmux-test--reply ctl "")
+    (setq sent nil)
+    (ghostel-tmux-test--feed
+     ctl (concat "%layout-change @0 aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
+                 " aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6} *\r\n"))
+    (ghostel-tmux--pump-deferred ctl)
+    (should (equal (car sent) "display-message -p -t @0 '#{window_visible_layout}'\n"))
+    ;; A second report while the question is out asks nothing more.
+    (ghostel-tmux-test--feed
+     ctl "%layout-change @0 aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6} bbbb,79x23,0,0,6 *Z\r\n")
+    (ghostel-tmux--pump-deferred ctl)
+    (should (= (length sent) 1))
+    (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
+              ((symbol-function 'ghostel--redraw-now) #'ignore)
+              ((symbol-function 'ghostel-tmux--commit-hidden-resize) #'ignore))
+      (ghostel-tmux-test--reply ctl "bbbb,79x23,0,0,6\r\n"))
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(6)))))
+
+(ert-deftest ghostel-tmux-test-selecting-a-tile-window-selects-its-pane ()
+  "The selected window of a tile makes its pane tmux's active one."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (setq sent nil)
+    (select-window (cadr (ghostel-tmux--tile-windows ctl 0)))
+    (ghostel-tmux--selection-change (selected-frame))
+    (ghostel-tmux--pump-deferred ctl)
+    (should (equal (car (last sent)) "select-pane -t %6\n"))
+    (should (eql (buffer-local-value 'ghostel-tmux--active-pane-id ctl) 6))
+    ;; Selecting it again asks nothing.
+    (setq sent nil)
+    (ghostel-tmux--selection-change (selected-frame))
+    (should-not sent)))
+
+(ert-deftest ghostel-tmux-test-reported-pane-selects-its-tile-window ()
+  "tmux's active pane moves the selection within the tile."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (should (eq (selected-window) (car windows)))
+      (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+      (should (eq (selected-window) (cadr windows)))
+      (should (eq (current-buffer) ctl)))))
+
+(ert-deftest ghostel-tmux-test-reported-pane-leaves-a-window-outside-the-tile ()
+  "A report keeps the selection of a window outside the tile."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,59x23,0,0{29x23,0,0,5,29x23,30,0,6}" sent
+    (let ((foreign (split-window (selected-window) 60 'right)))
+      (set-window-buffer foreign (get-buffer-create "*scratch*"))
+      (ghostel-tmux--tile-build 0 (selected-window))
+      (select-window foreign)
+      (set-buffer ctl)
+      (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+      (should (eq (selected-window) foreign)))))
+
+(ert-deftest ghostel-tmux-test-window-switch-replaces-the-tile ()
+  "Switching to another tmux window shows it in the selected tile window."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((other (generate-new-buffer "*ghostel-tmux:s:x%9*"))
+          (kept (cadr (ghostel-tmux--tile-windows ctl 0))))
+      (unwind-protect
+          (progn
+            (select-window kept)
+            (set-buffer ctl)
+            (with-current-buffer other
+              (setq-local ghostel-tmux--controller-buffer ctl)
+              (setq-local ghostel-tmux--pane-id 9)
+              (setq-local ghostel-tmux--window-id 1))
+            (puthash 9 other ghostel-tmux--panes)
+            (setq ghostel-tmux--session-id 1)
+            (puthash 1 (list :name "x" :panes '(9) :active-pane 9
+                             :tree (ghostel-tmux--parse-layout-tree "cccc,79x23,0,0,9"))
+                     ghostel-tmux--windows)
+            (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore))
+              (ghostel-tmux-test--feed ctl "%session-window-changed $1 @1\r\n"))
+            (should-not (ghostel-tmux--tile-windows ctl 0))
+            (should (equal (window-list nil 'no-mini) (list kept)))
+            (should (eq (window-buffer kept) other)))
+        (kill-buffer other)))))
+
+(ert-deftest ghostel-tmux-test-reported-selection-is-not-sent-back ()
+  "A window selected for tmux's report asks tmux for nothing."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (ghostel-tmux--tile-sync-size 0)
+    (ghostel-tmux-test--reply ctl "")
+    (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+    (setq sent nil)
+    (ghostel-tmux--selection-change (selected-frame))
+    (should-not sent)))
+
+(ert-deftest ghostel-tmux-test-report-skips-a-tile-window-showing-another-buffer ()
+  "The window of a pane that shows another buffer is not selected."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (set-window-buffer (cadr windows) (get-buffer-create "*scratch*"))
+      (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+      (should (eq (selected-window) (car windows))))))
+
+(ert-deftest ghostel-tmux-test-selecting-a-tile-of-another-window-sends-its-size ()
+  "A tile of a tmux window that is not the current one reports its size."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (setq ghostel-tmux--current-window-id 1
+          ghostel-tmux--active-pane-id 9
+          ghostel-tmux--client-size '(10 . 10)
+          sent nil)
+    (select-window (cadr (ghostel-tmux--tile-windows ctl 0)))
+    (ghostel-tmux--selection-change (selected-frame))
+    (ghostel-tmux--pump-deferred ctl)
+    (dotimes (_ 2) (ghostel-tmux-test--reply ctl ""))
+    (should (equal (mapcar (lambda (line) (car (split-string line " -")))
+                           (reverse sent))
+                   '("select-pane" "select-window" "refresh-client")))))
+
+(ert-deftest ghostel-tmux-test-window-split-off-a-tile-leaves-it ()
+  "A window split off a tile window gets a place of its own."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((foreign (split-window (car (ghostel-tmux--tile-windows ctl 0)) nil 'right)))
+      (set-window-buffer foreign (get-buffer-create "*scratch*"))
+      (should-not (ghostel-tmux--tile-intact-p 0 (ghostel-tmux--tile-windows ctl 0)))
+      (ghostel-tmux--tile-check)
+      (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+        (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))
+        (should (window-live-p foreign))
+        (should-not (memq foreign (ghostel-tmux--window-leaves
+                                   (ghostel-tmux--tile-root windows))))))))
+
+(ert-deftest ghostel-tmux-test-pane-report-without-tiles-keeps-the-selected-window ()
+  "Without splits, a pane change in a tmux window replaces its own pane."
+  (let ((ghostel-tmux-split-windows nil))
+    (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+      (let ((other (generate-new-buffer "*ghostel-tmux:s:x%9*"))
+            (left (selected-window)))
+        (unwind-protect
+            (let ((right (split-window left nil 'right)))
+              (with-current-buffer other
+                (setq-local ghostel-tmux--controller-buffer ctl)
+                (setq-local ghostel-tmux--pane-id 9)
+                (setq-local ghostel-tmux--window-id 1))
+              (puthash 9 other ghostel-tmux--panes)
+              (set-window-buffer right other)
+              (select-window right)
+              (set-buffer ctl)
+              (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore))
+                (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n"))
+              (should (eq (window-buffer right) other))
+              (should (eq (window-buffer left) (gethash 6 ghostel-tmux--panes))))
+          (kill-buffer other))))))
+
+(defun ghostel-tmux-test--tab-line-in (window)
+  "Return the tab line text WINDOW shows."
+  (with-selected-window window
+    (with-current-buffer (window-buffer window)
+      (substring-no-properties (ghostel-tmux--tab-line)))))
+
+(ert-deftest ghostel-tmux-test-tab-line-has-a-tab-per-tmux-window ()
+  "Each tmux window has a tab; the one shown is current."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (puthash 1 (list :name "logs 100%") ghostel-tmux--windows)
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :name "main")
+             ghostel-tmux--windows)
+    (setq ghostel-tmux--window-order '(0 1))
+    (let ((bar (ghostel-tmux--window-tabs 0 40)))
+      (should (string-prefix-p " main   logs 100% " (substring-no-properties bar)))
+      (should (= (string-width bar) 40))
+      (should (eq (get-text-property 1 'face bar) 'tab-line-tab-current))
+      (should (eql (get-text-property 1 'ghostel-tmux-window bar) 0))
+      (should (eql (get-text-property 8 'ghostel-tmux-window bar) 1)))))
+
+(ert-deftest ghostel-tmux-test-tab-line-is-one-bar-over-a-tile ()
+  "The windows of a tile's top row show their parts of one bar."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :name (make-string 50 ?a))
+             ghostel-tmux--windows)
+    (setq ghostel-tmux--window-order '(0))
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let* ((windows (ghostel-tmux--tile-windows ctl 0))
+           (root (ghostel-tmux--tile-root windows))
+           (left (ghostel-tmux-test--tab-line-in (car windows)))
+           (right (ghostel-tmux-test--tab-line-in (cadr windows))))
+      ;; The border between the two covers a column of the left window.
+      (should (= (length left) (ghostel-tmux--tab-line-columns (car windows) root)))
+      (should (= (length left) (1- (window-total-width (car windows)))))
+      (should (string-prefix-p (make-string (- 51 (length left)) ?a) right))
+      (should (string-prefix-p (concat left right)
+                               (substring-no-properties
+                                (ghostel-tmux--window-tabs 0 (frame-width))))))))
+
+(ert-deftest ghostel-tmux-test-tab-line-only-on-the-top-row ()
+  "A window below another in a tile has no tab line; tmux has no row for it."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x22,0,0[79x11,0,0,5,79x10,0,12,6]" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (should-not (window-parameter (car windows) 'tab-line-format))
+      (should (eq (window-parameter (cadr windows) 'tab-line-format) 'none))
+      (ghostel-tmux--tile-collapse windows (cadr windows))
+      (should-not (window-parameter (cadr windows) 'tab-line-format)))))
+
+(ert-deftest ghostel-tmux-test-tab-line-escapes-percent-after-slicing ()
+  "A `%' at the seam of two slices stays one character in each."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let* ((windows (ghostel-tmux--tile-windows ctl 0))
+           (cols (ghostel-tmux--tab-line-columns
+                  (car windows) (ghostel-tmux--tile-root windows))))
+      ;; The name puts a `%' in the last column of the left window.
+      (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :name
+                            (concat (make-string (- cols 2) ?a) "%b"))
+               ghostel-tmux--windows)
+      (setq ghostel-tmux--window-order '(0))
+      (let ((left (ghostel-tmux-test--tab-line-in (car windows)))
+            (right (ghostel-tmux-test--tab-line-in (cadr windows))))
+        (should (string-suffix-p "a%%" left))
+        (should (string-prefix-p "b " right))))))
+
+(ert-deftest ghostel-tmux-test-drop-tab-line-clears-the-format ()
+  "A sealed pane has no tab line left."
+  (with-temp-buffer
+    (ghostel-tmux-pane-mode 1)
+    (should tab-line-format)
+    (ghostel-tmux--drop-tab-line)
+    (should-not tab-line-format)
+    (ghostel-tmux-pane-mode -1)))
+
+(ert-deftest ghostel-tmux-test-window-tab-of-a-shown-window-selects-it ()
+  "A tab of a tmux window shown elsewhere selects its window there."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (setq ghostel-tmux--session-id 2)
+    (let* ((foreign (split-window (selected-window) 60 'right))
+           (other (generate-new-buffer "*ghostel-tmux:s:x%9*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer other
+              (setq-local ghostel-tmux--controller-buffer ctl)
+              (setq-local ghostel-tmux--pane-id 9)
+              (setq-local ghostel-tmux--window-id 1))
+            (puthash 9 other ghostel-tmux--panes)
+            (puthash 1 (list :name "x" :panes '(9)) ghostel-tmux--windows)
+            (set-window-buffer foreign other)
+            (ghostel-tmux--tile-build 0 (selected-window))
+            (setq sent nil)
+            (ghostel-tmux--show-tmux-window 1 (selected-window))
+            (ghostel-tmux--pump-deferred ctl)
+            (should (eq (selected-window) foreign))
+            (should-not ghostel-tmux--auto-host-window)
+            (should (equal sent '("select-window -t $2:@1\n"))))
+        (kill-buffer other)))))
+
+(ert-deftest ghostel-tmux-test-failed-window-tab-forgets-the-window ()
+  "A tab whose tmux window tmux cannot select leaves no window kept for it."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (cl-letf (((symbol-function 'ghostel-tmux--report-failure) #'ignore))
+      (ghostel-tmux--show-tmux-window 7 (selected-window))
+      (ghostel-tmux--pump-deferred ctl)
+      (should (eq ghostel-tmux--auto-host-window (selected-window)))
+      (ghostel-tmux-test--feed
+       ctl "%begin 1 1 1\r\ncan't find window\r\n%error 1 1 1\r\n")
+      (should-not ghostel-tmux--auto-host-window))))
+
+(ert-deftest ghostel-tmux-test-window-tab-asks-tmux-for-the-window ()
+  "A tab of another tmux window selects it, to be shown where it was clicked."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (setq ghostel-tmux--session-id 2)
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((window (cadr (ghostel-tmux--tile-windows ctl 0))))
+      (setq sent nil)
+      (ghostel-tmux--show-tmux-window 1 window)
+      (ghostel-tmux--pump-deferred ctl)
+      (should (equal sent '("select-window -t $2:@1\n")))
+      (should (eq ghostel-tmux--auto-host-window window))
+      ;; The tab of the window shown does nothing.
+      (setq sent nil ghostel-tmux--auto-host-window nil)
+      (ghostel-tmux--show-tmux-window 0 window)
+      (should-not sent)
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6))))))
+
+(defmacro ghostel-tmux-test--with-synced-tile (ctl &rest body)
+  "Run BODY after building CTL's tile of @0 and telling tmux its size.
+The layout has that size, as tmux's answer to it."
+  (declare (indent 1))
+  `(progn
+     (ghostel-tmux--tile-build 0 (selected-window))
+     (ghostel-tmux--tile-sync-size 0)
+     (ghostel-tmux-test--reply ,ctl "")
+     (let ((tree (plist-get (gethash 0 ghostel-tmux--windows) :tree)))
+       (setf (nth 1 tree) (car ghostel-tmux--client-size)
+             (nth 2 tree) (cdr ghostel-tmux--client-size)))
+     ;; The first check knows the tile's size.
+     (ghostel-tmux--tile-check)
+     ,@body))
+
+(defun ghostel-tmux-test--resize-commands (ctl)
+  "Return the resize commands CTL's tile of @0 asks for."
+  (with-current-buffer ctl
+    (ghostel-tmux--tile-resize-commands 0 (ghostel-tmux--tile-windows ctl 0))))
+
+(ert-deftest ghostel-tmux-test-dragged-divider-resizes-the-pane ()
+  "A window of a tile resized in Emacs asks tmux to resize its pane."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let* ((windows (ghostel-tmux--tile-windows ctl 0))
+             (left (car windows))
+             (scheduled nil))
+        (should-not (ghostel-tmux-test--resize-commands ctl))
+        (adjust-window-trailing-edge left 5 t)
+        (cl-letf (((symbol-function 'run-with-idle-timer)
+                   (lambda (&rest args) (setq scheduled args) 'timer))
+                  ((symbol-function 'ghostel-tmux--tile-fit)
+                   (lambda (&rest _) (error "Fitted"))))
+          (ghostel-tmux--tile-check))
+        (should (eq (nth 2 scheduled) #'ghostel-tmux--tile-resize))
+        (setq sent nil ghostel-tmux--resize-timer nil)
+        (ghostel-tmux--tile-resize)
+        (ghostel-tmux--pump-deferred ctl)
+        (should (equal sent (list (format "resize-pane -t %%5 -x %d\n"
+                                          (window-max-chars-per-line left)))))))))
+
+(ert-deftest ghostel-tmux-test-dragged-mode-line-resizes-the-pane-height ()
+  "Stacked windows resized in Emacs ask tmux for the height."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x22,0,0[79x11,0,0,5,79x10,0,12,6]" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((top (car (ghostel-tmux--tile-windows ctl 0))))
+        (adjust-window-trailing-edge top -3)
+        (should (equal (ghostel-tmux-test--resize-commands ctl)
+                       (list (format "resize-pane -t %%5 -y %d"
+                                     (floor (with-selected-window top
+                                              (window-screen-lines)))))))))))
+
+(ert-deftest ghostel-tmux-test-resize-targets-the-part-not-a-pane-inside ()
+  "The edge of a column is moved through a pane tmux resizes the column for."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7 8)
+      "aaaa,79x23,0,0{39x23,0,0[39x11,0,0{19x11,0,0,5,19x11,20,0,6},39x11,0,12,7],39x23,40,0,8}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((tree (plist-get (gethash 0 ghostel-tmux--windows) :tree)))
+        (should (eql (ghostel-tmux--edge-pane (car (nth 5 tree)) t) 7))
+        (adjust-window-trailing-edge (alist-get 7 (ghostel-tmux--tile-placed
+                                                   (ghostel-tmux--tile-windows ctl 0)))
+                                     4 t)
+        (should (string-prefix-p "resize-pane -t %7 -x "
+                                 (car (ghostel-tmux-test--resize-commands ctl))))))))
+
+(ert-deftest ghostel-tmux-test-resize-without-an-edge-pane-resizes-the-last-part ()
+  "A part whose every pane is in a split the same way resizes the last part."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{49x23,0,0{24x23,0,0,5,24x23,25,0,6},29x23,50,0,7}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((right (alist-get 7 (ghostel-tmux--tile-placed
+                                 (ghostel-tmux--tile-windows ctl 0)))))
+        (adjust-window-trailing-edge (alist-get 6 (ghostel-tmux--tile-placed
+                                                   (ghostel-tmux--tile-windows ctl 0)))
+                                     -4 t)
+        (should (equal (car (ghostel-tmux-test--resize-commands ctl))
+                       (format "resize-pane -t %%7 -x %d"
+                               (window-max-chars-per-line right))))))))
+
+(ert-deftest ghostel-tmux-test-resize-sends-every-changed-edge ()
+  "Each part of a split that changed gets its size."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7) "aaaa,79x23,0,0{25x23,0,0,5,25x23,26,0,6,27x23,52,0,7}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((placed (ghostel-tmux--tile-placed (ghostel-tmux--tile-windows ctl 0))))
+        (adjust-window-trailing-edge (alist-get 5 placed) 4 t)
+        (adjust-window-trailing-edge (alist-get 6 placed) 3 t)
+        (should (equal (mapcar (lambda (c) (car (split-string c " -x")))
+                               (ghostel-tmux-test--resize-commands ctl))
+                       '("resize-pane -t %5" "resize-pane -t %6")))))))
+
+(ert-deftest ghostel-tmux-test-resize-needs-the-tile-to-keep-its-size ()
+  "Windows changed with the tile, as by the minibuffer, are fitted back."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x22,0,0[79x11,0,0,5,79x10,0,12,6]" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((top (car (ghostel-tmux--tile-windows ctl 0))))
+        (adjust-window-trailing-edge top -3)
+        ;; The tile was some other size at the last check.
+        (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :tile-size '(1 . 1))
+                 ghostel-tmux--windows)
+        (cl-letf (((symbol-function 'run-with-idle-timer)
+                   (lambda (&rest _) (error "Scheduled"))))
+          (ghostel-tmux--tile-check))
+        (should (= (floor (with-selected-window top (window-screen-lines))) 11))))))
+
+(ert-deftest ghostel-tmux-test-resize-skips-a-window-showing-another-buffer ()
+  "A tile with a window showing another buffer resizes no pane."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x22,0,0[79x11,0,0,5,79x10,0,12,6]" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+        (set-window-buffer (cadr windows) (get-buffer-create "*scratch*"))
+        (adjust-window-trailing-edge (car windows) 3)
+        (should-not (ghostel-tmux-test--resize-commands ctl))))))
+
+(ert-deftest ghostel-tmux-test-resize-only-for-the-current-window ()
+  "A tile of a tmux window that is not the session's current one resizes nothing."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (adjust-window-trailing-edge (car (ghostel-tmux--tile-windows ctl 0)) 5 t)
+      (setq ghostel-tmux--current-window-id 1)
+      (should-not (ghostel-tmux-test--resize-commands ctl)))))
+
+(ert-deftest ghostel-tmux-test-resize-needs-a-layout-of-the-tile-size ()
+  "Windows that differ from a layout of another size are not a drag.
+That layout is from before tmux got the tile's size."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (adjust-window-trailing-edge (car (ghostel-tmux--tile-windows ctl 0)) 5 t)
+      (should (ghostel-tmux-test--resize-commands ctl))
+      (setf (nth 1 (plist-get (gethash 0 ghostel-tmux--windows) :tree)) 200)
+      (should-not (ghostel-tmux-test--resize-commands ctl)))))
+
+(ert-deftest ghostel-tmux-test-tile-build-shrinks-a-big-layout-in-proportion ()
+  "A layout bigger than the window gives each part its share."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,200x23,0,0{100x23,0,0,5,99x23,101,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (should (< (abs (- (window-total-width (car windows))
+                         (window-total-width (cadr windows))))
+                 3)))))
+
+(ert-deftest ghostel-tmux-test-selection-change-after-a-deleted-window ()
+  "The selection hook copes with the window selected before being gone."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((gone (car (ghostel-tmux--tile-windows ctl 0))))
+      (select-window gone)
+      (delete-window gone)
+      (cl-letf (((symbol-function 'frame-old-selected-window) (lambda (&rest _) gone)))
+        (ghostel-tmux--selection-change (selected-frame))))))
+
+(ert-deftest ghostel-tmux-test-refused-resize-fits-the-windows-back ()
+  "A resize tmux refuses puts the windows back to tmux's sizes."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((left (car (ghostel-tmux--tile-windows ctl 0))))
+        (adjust-window-trailing-edge left 5 t)
+        (ghostel-tmux--tile-resize)
+        (ghostel-tmux--pump-deferred ctl)
+        (ghostel-tmux-test--feed
+         ctl "%begin 1 1 1\r\nsize too small\r\n%error 1 1 1\r\n")
+        (should (= (window-max-chars-per-line left) 39))))))
+
+(ert-deftest ghostel-tmux-test-resize-waits-for-the-layout ()
+  "A drag while a layout is on its way resizes once the layout is there."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux-test--with-synced-tile ctl
+      (let ((left (car (ghostel-tmux--tile-windows ctl 0))))
+        (adjust-window-trailing-edge left 5 t)
+        (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :settling t)
+                 ghostel-tmux--windows)
+        (setq sent nil)
+        (cl-letf (((symbol-function 'run-with-idle-timer)
+                   (lambda (&rest _) (error "Scheduled"))))
+          (ghostel-tmux--tile-resize))
+        (should-not sent)
+        (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
+                  ((symbol-function 'ghostel--redraw-now) #'ignore)
+                  ((symbol-function 'ghostel-tmux--commit-hidden-resize) #'ignore))
+          (ghostel-tmux--show-layout
+           0 (ghostel-tmux--parse-layout-tree
+              (format "aaaa,%dx%d,0,0{39x23,0,0,5,39x23,40,0,6}"
+                      (car ghostel-tmux--client-size) (cdr ghostel-tmux--client-size)))))
+        (ghostel-tmux--pump-deferred ctl)
+        (should (string-prefix-p "resize-pane -t %5 -x " (car (last sent))))
+        (should (> (window-max-chars-per-line left) 39))))))
+
+(ert-deftest ghostel-tmux-test-killed-pane-hands-its-tile-window-over ()
+  "A tile window of a pane going away shows a sibling, not some other buffer."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((left (car (ghostel-tmux--tile-windows ctl 0)))
+          (doomed (gethash 5 ghostel-tmux--panes)))
+      (with-current-buffer ctl
+        (ghostel-tmux--remove-pane ctl 5 0))
+      (should-not (buffer-live-p doomed))
+      (should (eq (window-buffer left) (gethash 6 ghostel-tmux--panes))))))
+
+(ert-deftest ghostel-tmux-test-tile-that-lost-a-window-reports-no-size ()
+  "A tile that is not as its layout says sends tmux no size."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (delete-window (car (last (ghostel-tmux--tile-windows ctl 0))))
+    (setq sent nil)
+    (should-not (ghostel-tmux--tile-sync-size 0))
+    (should-not sent)))
+
+(ert-deftest ghostel-tmux-test-lone-window-showing-another-buffer-zooms-nothing ()
+  "The last window of a tile, showing another buffer, leaves the tile alone."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (set-window-buffer (car windows) (get-buffer-create "*scratch*"))
+      (delete-window (cadr windows))
+      (setq sent nil)
+      (ghostel-tmux--tile-check)
+      (should-not sent)
+      (should (eq (window-buffer (car windows)) (get-buffer "*scratch*")))
+      (should-not (window-parameter (car windows) 'ghostel-tmux-tile)))))
+
+(ert-deftest ghostel-tmux-test-leaving-the-minibuffer-keeps-a-selection-made-from-it ()
+  "A window selected by a command from the minibuffer stays selected."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (select-window (cadr windows))
+      (cl-letf (((symbol-function 'frame-old-selected-window)
+                 (lambda (&rest _) (minibuffer-window))))
+        (ghostel-tmux--selection-change (selected-frame)))
+      (should (eq (selected-window) (cadr windows)))
+      (ghostel-tmux--pump-deferred ctl)
+      (should (member "select-pane -t %6\n" sent)))))
+
+(ert-deftest ghostel-tmux-test-leaving-the-minibuffer-follows-a-held-report ()
+  "A report held back while in the minibuffer is followed on leaving it."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,59x23,0,0{29x23,0,0,5,29x23,30,0,6}" sent
+    (let ((mini (split-window (selected-window) 60 'right)))
+      (set-window-buffer mini (get-buffer-create "*scratch*"))
+      (ghostel-tmux--tile-build 0 (selected-window))
+      (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+        ;; MINI stands in for the minibuffer window.
+        (cl-letf (((symbol-function 'window-minibuffer-p) (lambda (w) (eq w mini))))
+          (select-window mini)
+          (set-buffer ctl)
+          (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+          (should (eql ghostel-tmux--held-pane 6))
+          (should (eq (selected-window) mini))
+          (select-window (car windows))
+          (cl-letf (((symbol-function 'frame-old-selected-window) (lambda (&rest _) mini)))
+            (ghostel-tmux--selection-change (selected-frame))))
+        (should (eq (selected-window) (cadr windows)))
+        (should-not (buffer-local-value 'ghostel-tmux--held-pane ctl))))))
+
+(ert-deftest ghostel-tmux-test-sealed-panes-leave-their-tile ()
+  "Sealing a session's panes keeps their windows, no longer a tile."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (cl-letf (((symbol-function 'ghostel-tmux--seal-pane-buffer) #'ignore))
+        (ghostel-tmux--seal-panes ctl))
+      (should (cl-every #'window-live-p windows))
+      (should-not (cl-some (lambda (w) (window-parameter w 'ghostel-tmux-tile)) windows))
+      (should-not (cl-some (lambda (w) (window-parameter w 'tab-line-format)) windows)))))
+
+(ert-deftest ghostel-tmux-test-failed-layout-query-drops-a-pending-resize ()
+  "A resize waiting for a layout that does not come is dropped."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (ghostel-tmux--settle-layout 0)
+    (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :resize-pending t)
+             ghostel-tmux--windows)
+    (ghostel-tmux--pump-deferred ctl)
+    (ghostel-tmux-test--feed ctl "%begin 1 1 1\r\nno window\r\n%error 1 1 1\r\n")
+    (should-not (plist-get (gethash 0 ghostel-tmux--windows) :settling))
+    (should-not (plist-get (gethash 0 ghostel-tmux--windows) :resize-pending))))
+
+(ert-deftest ghostel-tmux-test-resize-pane-in-a-tile-keeps-tmux-size ()
+  "A pane of a tile keeps its size when its window changes."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (setq sent nil)
+    (with-current-buffer (gethash 5 ghostel-tmux--panes)
+      (setq-local ghostel--term 'fake-term)
+      (setq-local ghostel--term-rows 23)
+      (setq-local ghostel--term-cols 39)
+      (let (sizes)
+        (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
+                   (lambda (_term rows cols) (push (cons cols rows) sizes))))
+          (ghostel-tmux--resize-pane 10 10))
+        (should (equal sizes '((39 . 23))))
+        (should (= ghostel--term-cols 39))))
+    (should-not sent)))
 
 (provide 'ghostel-tmux-test)
 
