@@ -4552,7 +4552,8 @@ collects the lines sent, newest first.  The panes are plain buffers."
      (let ((,sent nil)
            (bufs nil)
            (ghostel-tmux--tiles-exist nil)
-           (ghostel-tmux--tile-timer nil))
+           (ghostel-tmux--tile-timer nil)
+           (ghostel-tmux--tile-members nil))
        (unwind-protect
            (save-window-excursion
              (delete-other-windows)
@@ -4731,6 +4732,224 @@ collects the lines sent, newest first.  The panes are plain buffers."
     (ghostel-tmux--tile-check)
     (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6 7)))))
 
+(defun ghostel-tmux-test--commands (sent)
+  "Return the commands SENT and those still queued, oldest first, as one string."
+  (mapconcat #'identity
+             (append (reverse sent)
+                     (mapcar (lambda (c) (concat (car c) "\n")) ghostel-tmux--command-queue))
+             ""))
+
+(ert-deftest ghostel-tmux-test-swap-commands-reorder-the-panes ()
+  (should (equal (ghostel-tmux--swap-commands '(5 6 7) '(6 5 7))
+                 '("swap-pane -d -s %5 -t %6")))
+  (should (equal (ghostel-tmux--swap-commands '(5 6 7) '(6 5 7) 6)
+                 '("swap-pane -d -s %6 -t %5")))
+  (should (equal (ghostel-tmux--swap-commands '(5 6 7) '(7 5 6))
+                 '("swap-pane -d -s %5 -t %7" "swap-pane -d -s %6 -t %5")))
+  (should-not (ghostel-tmux--swap-commands '(5 6) '(5 6))))
+
+(ert-deftest ghostel-tmux-test-swapped-window-states-swap-the-panes ()
+  "`window-swap-states' in a tile swaps the panes in tmux and keeps the tile."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (window-swap-states (nth 0 windows) (nth 1 windows))
+      (set-buffer ctl)
+      (setq sent nil)
+      (ghostel-tmux--tile-check)
+      (should (equal (ghostel-tmux--tile-windows ctl 0) windows))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(6 5 7)))
+      (should (eq (window-parameter (nth 2 windows) 'tab-line-format) 'none))
+      (should (string-search "swap-pane -d -s %5 -t %6\n" (ghostel-tmux-test--commands sent)))
+      ;; Waiting for tmux, a check sends nothing more.
+      (let ((before (ghostel-tmux-test--commands sent)))
+        (ghostel-tmux--tile-check)
+        (should (equal (ghostel-tmux-test--commands sent) before)))
+      (ghostel-tmux-test--reply ctl)
+      (ghostel-tmux-test--reply
+       ctl "aaaa,79x23,0,0{39x23,0,0,6,39x23,40,0[39x11,40,0,5,39x11,40,12,7]}\r\n")
+      (should (equal (ghostel-tmux--tile-windows ctl 0) windows))
+      (should-not (plist-get (gethash 0 ghostel-tmux--windows) :swap-order)))))
+
+(ert-deftest ghostel-tmux-test-swapped-window-states-of-two-panes-keep-the-tile ()
+  "Both windows of a tile of two lose their tile to a swap and get it back."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (setq sent nil)
+      (window-swap-states (nth 0 windows) (nth 1 windows))
+      (dolist (w windows)
+        (ghostel-tmux--apply-pane-size (window-buffer w) w))
+      (set-buffer ctl)
+      (ghostel-tmux--tile-check)
+      (should (equal (ghostel-tmux--tile-windows ctl 0) windows))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(6 5)))
+      (should (string-search "swap-pane -d -s %5 -t %6\n" (ghostel-tmux-test--commands sent))))))
+
+(ert-deftest ghostel-tmux-test-swapped-buffers-swap-the-panes ()
+  "Panes swapped between windows of a tile by their buffers swap in tmux."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (set-window-buffer (nth 0 windows) (gethash 6 ghostel-tmux--panes))
+      (set-window-buffer (nth 1 windows) (gethash 5 ghostel-tmux--panes))
+      (setq sent nil)
+      (ghostel-tmux--tile-check)
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(6 5)))
+      ;; The selected window's pane, active in tmux, goes first.
+      (let ((commands (ghostel-tmux-test--commands sent)))
+        (should (string-search "select-pane -t %6\n" commands))
+        (should (string-search "swap-pane -d -s %6 -t %5\n" commands))))))
+
+(defun ghostel-tmux-test--reply (ctl &optional payload)
+  "Answer CTL's command in flight with PAYLOAD, then send the next one."
+  (ghostel-tmux-test--feed ctl (format "%%begin 1 1 1\r\n%s%%end 1 1 1\r\n" (or payload "")))
+  (ghostel-tmux--pump-deferred ctl))
+
+(ert-deftest ghostel-tmux-test-swaps-follow-the-swaps-on-their-way ()
+  "A swap made before tmux answers the last one swaps from the order it gives."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (setq sent nil)
+      (window-swap-states (nth 0 windows) (nth 1 windows))
+      (set-buffer ctl)
+      (ghostel-tmux--tile-check)
+      (window-swap-states (nth 1 windows) (nth 2 windows))
+      (set-buffer ctl)
+      (ghostel-tmux--tile-check)
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(6 7 5)))
+      (let ((commands (ghostel-tmux-test--commands sent)))
+        (should (string-search "swap-pane -d -s %5 -t %6\n" commands))
+        (should (string-search "swap-pane -d -s %5 -t %7\n" commands))
+        (should (= 2 (cl-count-if (lambda (c) (string-prefix-p "swap-pane" c))
+                                  (split-string commands "\n")))))
+      (ghostel-tmux-test--reply ctl)
+      (ghostel-tmux-test--reply
+       ctl "aaaa,79x23,0,0{39x23,0,0,6,39x23,40,0[39x11,40,0,5,39x11,40,12,7]}\r\n")
+      (should (plist-get (gethash 0 ghostel-tmux--windows) :swap-order))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(6 7 5)))
+      (ghostel-tmux-test--reply ctl)
+      (ghostel-tmux-test--reply
+       ctl "aaaa,79x23,0,0{39x23,0,0,6,39x23,40,0[39x11,40,0,7,39x11,40,12,5]}\r\n")
+      (should-not (plist-get (gethash 0 ghostel-tmux--windows) :swap-order))
+      (should (equal (ghostel-tmux--tile-windows ctl 0) windows))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(6 7 5))))))
+
+(ert-deftest ghostel-tmux-test-swapping-back-before-tmux-answers ()
+  "Panes swapped back before tmux answers end in the order Emacs shows."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (setq sent nil)
+      (dotimes (_ 2)
+        (window-swap-states (nth 0 windows) (nth 1 windows))
+        (set-buffer ctl)
+        (ghostel-tmux--tile-check))
+      ;; The active pane is the source of each swap.
+      (should (= 2 (cl-count-if (lambda (c) (equal c "swap-pane -d -s %5 -t %6"))
+                                (split-string (ghostel-tmux-test--commands sent) "\n"))))
+      (ghostel-tmux-test--reply ctl)
+      (ghostel-tmux-test--reply ctl "aaaa,79x23,0,0{39x23,0,0,6,39x23,40,0,5}\r\n")
+      (ghostel-tmux-test--reply ctl)
+      (ghostel-tmux-test--reply ctl "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\r\n")
+      (should (equal (ghostel-tmux--tile-windows ctl 0) windows))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6))))))
+
+(ert-deftest ghostel-tmux-test-a-swap-while-settling-goes-to-tmux ()
+  "Panes swapped while a layout is on its way swap in tmux too."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :settling t) ghostel-tmux--windows)
+      (setq sent nil)
+      (window-swap-states (nth 0 windows) (nth 1 windows))
+      (set-buffer ctl)
+      (ghostel-tmux--tile-check)
+      (should (string-search "swap-pane -d -s %5 -t %6\n" (ghostel-tmux-test--commands sent))))))
+
+(ert-deftest ghostel-tmux-test-restore-split-ends-a-swap-on-its-way ()
+  "A tile waiting for swaps is built in tmux's order again."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (window-swap-states (nth 0 windows) (nth 1 windows))
+      (set-buffer ctl)
+      (ghostel-tmux--tile-check)
+      (should (plist-get (gethash 0 ghostel-tmux--windows) :swap-order))
+      (ghostel-tmux-restore-split)
+      (set-buffer ctl)
+      (should-not (plist-get (gethash 0 ghostel-tmux--windows) :swap-order))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6))))))
+
+(ert-deftest ghostel-tmux-test-panes-swapped-in-tmux-move-in-the-tile ()
+  "A layout with the panes of a tile in another order shows them so."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (ghostel-tmux--show-layout
+     0 (ghostel-tmux--parse-layout-tree "aaaa,79x23,0,0{39x23,0,0,6,39x23,40,0,5}"))
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(6 5)))
+    (should (equal (mapcar #'window-buffer (ghostel-tmux--tile-windows ctl 0))
+                   (list (gethash 6 ghostel-tmux--panes) (gethash 5 ghostel-tmux--panes))))
+    (should-not (string-search "swap-pane" (ghostel-tmux-test--commands sent)))))
+
+(ert-deftest ghostel-tmux-test-a-copied-tile-window-is-part-of-no-tile ()
+  "A window state of a tile window put in another window, as by `clone-frame'."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let* ((windows (ghostel-tmux--tile-windows ctl 0))
+           (copy (split-window (nth 1 windows) nil 'below)))
+      (window-state-put (window-state-get (nth 1 windows)) copy)
+      (set-buffer ctl)
+      (ghostel-tmux--tile-check)
+      (should-not (window-parameter copy 'ghostel-tmux-tile))
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6))))))
+
+(ert-deftest ghostel-tmux-test-restore-split-shows-the-panes-again ()
+  "A window of a tile showing another buffer shows its pane again."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (select-window (nth 1 windows))
+      (set-window-buffer (nth 1 windows) (get-buffer-create "*scratch*"))
+      (ghostel-tmux-restore-split)
+      (set-buffer ctl)
+      (should (equal (ghostel-tmux--tile-windows ctl 0) windows))
+      (should (eq (window-buffer (nth 1 windows)) (gethash 6 ghostel-tmux--panes))))))
+
+(ert-deftest ghostel-tmux-test-restore-split-builds-a-lost-tile-again ()
+  "A tile that lost windows is built again; a zoomed window is unzoomed."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (delete-window (nth 2 (ghostel-tmux--tile-windows ctl 0)))
+    (ghostel-tmux-restore-split)
+    (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6 7)))
+    (puthash 0 (thread-first (gethash 0 ghostel-tmux--windows)
+                             (plist-put :tree (ghostel-tmux--parse-layout-tree "aaaa,79x23,0,0,6"))
+                             (plist-put :zoomed t))
+             ghostel-tmux--windows)
+    (setq sent nil ghostel-tmux--command-queue nil ghostel-tmux--command-in-flight nil)
+    (ghostel-tmux-restore-split)
+    (should (string-search "resize-pane -Z -t %6\n" (ghostel-tmux-test--commands sent)))))
+
+(ert-deftest ghostel-tmux-test-restore-split-moves-the-tile-to-a-pane-window ()
+  "From a window showing a pane outside the tile, the tile moves there."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (let ((other (split-window (selected-window) nil 'below)))
+      (ghostel-tmux--tile-build 0 (selected-window))
+      (let ((old (ghostel-tmux--tile-windows ctl 0)))
+        (set-window-buffer other (gethash 6 ghostel-tmux--panes))
+        (select-window other)
+        (ghostel-tmux-restore-split)
+        (set-buffer ctl)
+        (should (memq (selected-window) (ghostel-tmux--tile-windows ctl 0)))
+        (should-not (cl-intersection old (ghostel-tmux--tile-windows ctl 0)))
+        (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))))))
+
 (ert-deftest ghostel-tmux-test-a-closed-tmux-window-collapses-its-tile ()
   "A tmux window closed while its tile is shown leaves one window."
   (ghostel-tmux-test--with-tile ctl '(5 6 7)
@@ -4765,6 +4984,16 @@ collects the lines sent, newest first.  The panes are plain buffers."
       (should (= 1 (length (window-list nil 'no-mini))))
       (should-not (window-parameter (selected-window) 'ghostel-tmux-tile))
       (should zoomed))))
+
+(ert-deftest ghostel-tmux-test-restore-split-refuses-a-detached-pane ()
+  (let ((buf (generate-new-buffer "*sealed*")))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer buf
+            (setq-local ghostel-tmux-pane-mode t))
+          (set-window-buffer (selected-window) buf)
+          (should-error (ghostel-tmux-restore-split) :type 'user-error))
+      (kill-buffer buf))))
 
 (ert-deftest ghostel-tmux-test-tile-keeps-foreign-window ()
   "A window beside the tile survives building and collapsing it."

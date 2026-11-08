@@ -228,6 +228,13 @@ Each window shows its pane, at the columns and rows tmux gives the pane."
                                            (window-screen-lines)))))))))
           windows))))
 
+(defun elate-tmux-order-p ()
+  "Non-nil when the selected window's split has its panes in tmux's order."
+  (when-let* ((windows (elate-tmux-split-windows)))
+    (equal (split-string (elate-tmux-call "list-panes" "-t" (elate-tmux-session (window-buffer (car windows)))
+                                          "-F" "#{pane_id}"))
+           (mapcar (lambda (w) (elate-tmux-id (window-buffer w))) windows))))
+
 (defun elate-tmux-active-p ()
   "Non-nil when tmux's active pane is the one the selected window shows."
   (when-let* ((b (elate-tmux-shown)))

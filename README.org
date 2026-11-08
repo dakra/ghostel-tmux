@@ -23,6 +23,7 @@ tabs in the tab line.
 | =M-x ghostel-tmux-capture=                        | One-shot snapshot: dump a single pane's scrollback into a fresh buffer (no live link).  |
 | =M-x ghostel-tmux-next-pane= / =ghostel-tmux-prev-pane= | Cycle through sibling panes, across tmux windows (=C-t C-n= / =C-t C-p=).              |
 | =M-x ghostel-tmux-switch-pane=                    | =completing-read= picker over sibling panes (=C-t s=).                                    |
+| =M-x ghostel-tmux-restore-split=                  | Split the window's tmux window again as tmux lays it out (=C-t r=).                      |
 | =M-x ghostel-tmux-reset=                          | Escape hatch: reset tmux state when the protocol parser is wedged.                      |
 
 With a remote =default-directory=, =ghostel-tmux-new=, =ghostel-tmux-attach= and
@@ -109,6 +110,7 @@ over the active session, so they work the same whether you started tmux via
 | =C-t C-n=      | -                     | Next pane in tab order, across windows.      |
 | =C-t C-p=      | -                     | Previous pane in tab order, across windows.  |
 | =C-t s=        | -                     | Pick a pane with =completing-read=.          |
+| =C-t r=        | -                     | Split the window again as tmux lays it out.  |
 | =C-t ,=        | =rename-window=         | Prompt and rename the current window.       |
 | =C-t $=        | =rename-session=        | Prompt and rename the current session.      |
 | =C-t 0= ... =9=  | =select-window -t :N=   | Jump to window N.                            |
@@ -135,7 +137,9 @@ of the split has it.  Switching tmux windows (=C-t n=, =C-t 1=) shows the
 other window in the place of the split.
 
 Dragging a divider or a mode line between windows of the split, or resizing
-one with =C-x {= and the like, resizes the pane in tmux.
+one with =C-x {= and the like, resizes the pane in tmux.  Swapping windows of
+the split (=windmove-swap-states-left= and the like) swaps their panes in tmux
+(=swap-pane=), and panes swapped in tmux (=C-b {=) show in their new places.
 
 =C-t z= zooms the current pane to the whole split, and shows all panes of its
 window again.  Deleting all windows of a split but one (=C-x 1=) zooms its
@@ -143,6 +147,10 @@ pane, and deleting some builds the split again.  A window of the split can
 show another buffer for a while and keeps its place until tmux
 changes the window's layout, and a window split off
 one of its windows (=C-x 3=) gets a place beside the split.
+=M-x ghostel-tmux-restore-split= (=C-t r=) shows the split as tmux lays it out
+again: its windows show their panes, lost windows come back, and a zoomed pane
+is unzoomed.  Run from a window showing a pane outside the split, it moves the
+split there.
 
 tmux has one size per client, for all windows of its session: of two splits
 of one session shown at once, the one not of the current tmux window shows
@@ -214,7 +222,7 @@ server under =/tmp/ghostel-tmux-elate-*=.
 | =test/elate/takeover.json=     | =tmux -CC= in a shell, per host shell and PTY backend, and every way out.  |
 | =test/elate/panes.json=        | Keys, splits, switching, windows, scrollback, a second client, closing, with one pane per Emacs window. |
 | =test/elate/subprocess.json=   | =ghostel-tmux-attach=, =ghostel-tmux-new= and =ghostel-tmux-capture=, with one pane per Emacs window. |
-| =test/elate/splits.json=       | Panes as Emacs splits: selection, zoom, resizing, switching windows, closing. |
+| =test/elate/splits.json=       | Panes as Emacs splits: selection, swaps, restoring, zoom, resizing, switching windows, closing. |
 
 One variant of one scenario:
 

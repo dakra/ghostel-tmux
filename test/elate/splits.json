@@ -1,6 +1,6 @@
 {
   "name": "splits",
-  "comment": "A tmux window of several panes shown as Emacs window splits (`ghostel-tmux-split-windows'): splitting, selection both ways, zoom, resizing from Emacs and by the frame, a window beside the split, switching tmux windows, closing, leaving. `params' is the takeover from a shell, `new' overrides it with M-x ghostel-tmux-new.",
+  "comment": "A tmux window of several panes shown as Emacs window splits (`ghostel-tmux-split-windows'): splitting, selection both ways, swapping panes, restoring the split, zoom, resizing from Emacs and by the frame, a window beside the split, switching tmux windows, closing, leaving. `params' is the takeover from a shell, `new' overrides it with M-x ghostel-tmux-new.",
   "params": {
     "enter": "(ghostel)",
     "ready": "(elate-tmux-prompt-p)",
@@ -53,6 +53,24 @@
     {"wait": "until", "pred": "(and (not (eq (window-buffer (selected-window)) elate-p0)) (elate-tmux-active-p))"},
     {"eval": "(elate-tmux-call \"select-pane\" \"-t\" (elate-tmux-id elate-p0))"},
     {"wait": "until", "pred": "(eq (window-buffer (selected-window)) elate-p0)"},
+
+    {"group": "swap", "comment": "windows swapped in Emacs swap their panes in tmux, panes swapped in tmux swap in Emacs, and ghostel-tmux-restore-split shows a split's panes again"},
+    {"eval": "(require 'windmove)"},
+    {"eval": "(progn (select-window (frame-first-window)) (windmove-swap-states-right))"},
+    {"wait": "until", "pred": "(and (eq (window-buffer (nth 1 (elate-tmux-split-windows))) elate-p0) (elate-tmux-order-p) (elate-tmux-split-p 3))"},
+    {"assert": {"eval": "(and (eq (current-buffer) elate-p0) (elate-tmux-active-p))"}},
+    {"assert": {"eval": "(equal (mapcar (lambda (w) (window-parameter w 'tab-line-format)) (window-list nil nil (frame-first-window))) '(nil nil none))"}},
+    {"eval": "(elate-tmux-call \"swap-pane\" \"-s\" (elate-tmux-id elate-p0) \"-t\" (elate-tmux-id (window-buffer (frame-first-window))))"},
+    {"wait": "until", "pred": "(and (eq (window-buffer (frame-first-window)) elate-p0) (elate-tmux-order-p) (elate-tmux-split-p 3))"},
+    {"eval": "(progn (select-window (nth 2 (elate-tmux-split-windows))) (switch-to-buffer (get-buffer-create \"*scratch*\")))"},
+    {"assert": {"eval": "(= 3 (length (elate-tmux-split-windows)))"}},
+    {"eval": "(call-interactively #'ghostel-tmux-restore-split)"},
+    {"wait": "until", "pred": "(and (elate-tmux-split-p 3) (elate-tmux-order-p) (elate-tmux-active-p))"},
+    {"eval": "(select-window (frame-first-window))"},
+    {"wait": "until", "pred": "(and (eq (current-buffer) elate-p0) (elate-tmux-active-p))"},
+    {"eval": "(windmove-swap-states-right)", "comment": "two swaps before tmux answers the first"},
+    {"eval": "(windmove-swap-states-down)"},
+    {"wait": "until", "pred": "(and (eq (window-buffer (nth 2 (elate-tmux-split-windows))) elate-p0) (elate-tmux-order-p) (elate-tmux-split-p 3) (elate-tmux-active-p))"},
 
     {"group": "zoom", "comment": "C-t z shows one pane and then all; C-x 1 zooms the pane left"},
     {"keys": "C-t z"},
@@ -111,6 +129,10 @@
     {"keys": "C-t x"},
     {"wait": "until", "pred": "(elate-tmux-split-p 2)"},
     {"wait": "until", "pred": "(= 3 (length (elate-tmux-panes)))"},
+    {"eval": "(let ((ws (elate-tmux-split-windows))) (select-window (nth 1 ws)) (setq elate-b (current-buffer)) (window-swap-states (nth 1 ws) (nth 0 ws)) (select-window (nth 0 ws)))", "comment": "a swap of two from the second window, whose pane is tmux's active one, keeps it selected"},
+    {"wait": "until", "pred": "(and (eq (window-buffer (car (elate-tmux-split-windows))) elate-b) (elate-tmux-order-p) (elate-tmux-split-p 2) (eq (current-buffer) elate-b) (elate-tmux-active-p))"},
+    {"eval": "(sit-for 1)"},
+    {"assert": {"eval": "(and (eq (current-buffer) elate-b) (elate-tmux-active-p) (elate-tmux-split-p 2))"}},
 
     {"group": "leave", "comment": "C-t d detaches; no window is left part of a split"},
     {"keys": "C-t d"},

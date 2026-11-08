@@ -159,11 +159,13 @@ matching `%end' arrives; or with nil when an `%error' is received.")
 (defvar-local ghostel-tmux--windows nil
   "Hash table mapping integer window-id to a plist.
 Its keys are :name, :panes, :active-pane (tmux's active pane of that
-window), :zooming (see `ghostel-tmux--ensure-pane-zoomed'), :tree (the
-visible layout, see `ghostel-tmux--parse-layout-tree'), :settling (see
+window), :zooming (see `ghostel-tmux--ensure-pane-zoomed'), :zoomed (as
+`%layout-change' last said), :tree (the visible layout, see
+`ghostel-tmux--parse-layout-tree'), :settling (see
 `ghostel-tmux--settle-layout'), :tile-tree and :tiled, the layout and
 the panes its tile was built with, :tile-size, its pixel size when last
-fitted or checked, and :resize-pending (see `ghostel-tmux--tile-resize').")
+fitted or checked, :resize-pending (see `ghostel-tmux--tile-resize'),
+and :swap-order and :swap-query (see `ghostel-tmux--tile-swap').")
 
 (defvar-local ghostel-tmux--client-size nil
   "The size last sent with `refresh-client -C', as (COLS . ROWS).")
@@ -1120,6 +1122,10 @@ FLAGS are the window's flags, nil when not known."
          (window-name (and existing (plist-get existing :name))))
     (let ((entry (or existing (list :name window-name))))
       (setq entry (plist-put entry :panes pane-ids))
+      (setq entry (plist-put entry :zoomed
+                             (if flags
+                                 (and (string-search "Z" flags) t)
+                               (< (length visible) (length panes)))))
       ;; A tile takes its layout from `--settle-layout' only.
       (unless (ghostel-tmux--tile-windows controller wid)
         (setq entry (plist-put entry :tree (or visible-tree tree))))
@@ -1781,6 +1787,7 @@ The visible switch happens reactively in `--on-session-window-changed'."
 (define-key ghostel-tmux-prefix-map (kbd "C-n") #'ghostel-tmux-next-pane)
 (define-key ghostel-tmux-prefix-map (kbd "C-p") #'ghostel-tmux-prev-pane)
 (define-key ghostel-tmux-prefix-map (kbd "s") #'ghostel-tmux-switch-pane)
+(define-key ghostel-tmux-prefix-map (kbd "r") #'ghostel-tmux-restore-split)
 
 (defvar ghostel-tmux-pane-repeat-map
   (let ((map (make-sparse-keymap)))
@@ -1981,6 +1988,10 @@ instead, see `ghostel-tmux--tile-check'."
 (defvar ghostel-tmux--tile-timer nil
   "Timer of a pending `ghostel-tmux--tile-check'.")
 
+(defvar ghostel-tmux--tile-members nil
+  "The windows of the tiles as last checked, as (WINDOW CONTROLLER . WID).
+`window-swap-states' keeps the windows and drops their parameters.")
+
 (defun ghostel-tmux--tile-leaf (window &optional controller wid)
   "Return the tile parameter of WINDOW, or nil.
 With CONTROLLER and WID, only for a window of the tile of that window.
@@ -2008,8 +2019,30 @@ The windows of each come top left first."
 
 (defun ghostel-tmux--leave-tile (window)
   "Make WINDOW part of no tile, with a tab line of its own."
+  (setq ghostel-tmux--tile-members (assq-delete-all window ghostel-tmux--tile-members))
   (set-window-parameter window 'ghostel-tmux-tile nil)
   (set-window-parameter window 'tab-line-format nil))
+
+(defun ghostel-tmux--recover-members ()
+  "Put the windows of a tile that lost it back in their tile.
+A window state put in a window of a tile, as by `window-swap-states',
+drops its tile parameter; the window is back when it shows a pane of
+the tile.  Then note the windows of the tiles."
+  (pcase-dolist (`(,window ,controller . ,wid) ghostel-tmux--tile-members)
+    (when (and (window-live-p window)
+               (buffer-live-p controller)
+               (not (window-parameter window 'ghostel-tmux-tile)))
+      (let* ((buf (window-buffer window))
+             (pid (buffer-local-value 'ghostel-tmux--pane-id buf)))
+        (when (and pid
+                   (eq (buffer-local-value 'ghostel-tmux--controller-buffer buf) controller)
+                   (eql (buffer-local-value 'ghostel-tmux--window-id buf) wid))
+          (set-window-parameter window 'ghostel-tmux-tile (list controller wid pid))))))
+  (setq ghostel-tmux--tile-members
+        (delq nil (mapcar (lambda (window)
+                            (when-let* ((tile (ghostel-tmux--tile-leaf window)))
+                              (cons window (cons (nth 0 tile) (nth 1 tile)))))
+                          (ghostel-tmux--all-windows)))))
 
 (defun ghostel-tmux--all-windows ()
   "Return the windows of all frames, each frame's top left first."
@@ -2101,9 +2134,9 @@ or a row between the parts of a split."
               (+ (apply #'+ (mapcar #'cdr kids)) seps))))))
 
 (defun ghostel-tmux--layout-shape (node)
-  "Return layout NODE without its sizes."
+  "Return layout NODE without its sizes and panes."
   (if (eq (car node) 'pane)
-      (nth 5 node)
+      'pane
     (cons (car node) (mapcar #'ghostel-tmux--layout-shape (nth 5 node)))))
 
 (defun ghostel-tmux--layout-prune (node keep)
@@ -2146,6 +2179,7 @@ leaves out the rest of that split."
         ;; A window dedicated to another buffer stays out of the tile.
         (when (ignore-errors (set-window-buffer window (alist-get pid panes) t) t)
           (set-window-parameter window 'ghostel-tmux-tile (append tile (list pid)))
+          (setf (alist-get window ghostel-tmux--tile-members) (cons (car tile) (cadr tile)))
           (list (cons pid window))))
     (let* ((horizontal (eq (car node) 'h))
            (window-of (lambda (_pid) window))
@@ -2263,14 +2297,10 @@ on the pane it showed."
         (ghostel-tmux--add-tile-hooks)
         (puthash wid (thread-first entry
                                    (plist-put :tile-tree tree)
-                                   (plist-put :tiled (mapcar #'car placed)))
+                                   (plist-put :tiled (mapcar #'car placed))
+                                   (plist-put :swap-order nil))
                  ghostel-tmux--windows)
-        ;; Only the top row has a tab line: a stacked window's mode line
-        ;; takes tmux's separator row.
-        (let ((top (window-pixel-top (ghostel-tmux--tile-root (mapcar #'cdr placed)))))
-          (pcase-dolist (`(,_pid . ,w) placed)
-            (set-window-parameter w 'tab-line-format
-                                  (and (> (window-pixel-top w) top) 'none))))
+        (ghostel-tmux--tile-tab-lines (mapcar #'cdr placed))
         (ghostel-tmux--tile-fit tree placed)
         (ghostel-tmux--note-tile-size wid (mapcar #'cdr placed))
         (when selected
@@ -2294,6 +2324,8 @@ leaves the tile, and is selected when one of WINDOWS was.  Return KEEP."
       (dolist (window windows)
         (unless (eq window keep)
           (when (window-live-p window)
+            ;; A window brought back, as by `winner-undo', is of no tile.
+            (ghostel-tmux--leave-tile window)
             (ignore-errors (delete-window window)))))
       (when (window-live-p keep)
         (ghostel-tmux--leave-tile keep)
@@ -2308,14 +2340,16 @@ leaves the tile, and is selected when one of WINDOWS was.  Return KEEP."
 
 (defun ghostel-tmux--tile-intact-p (wid windows)
   "Return non-nil when WINDOWS show the tile of WID as its layout is.
-They are the windows it was built with, of the layout's shape, and no
-other window, such as one split off a window of the tile, is among
-them.  A tile built without some of the layout's panes is intact only
-as long as the layout stays the same."
+They are on one frame, have the panes the tile was built with, are of
+the layout's shape, and no other window, such as one split off a
+window of the tile, is among them; `ghostel-tmux--tile-order' compares
+the order of their panes.  A tile built without some of the layout's
+panes is intact only as long as the layout stays the same."
   (let* ((entry (gethash wid ghostel-tmux--windows))
          (tree (plist-get entry :tree))
          (tiled (sort (copy-sequence (plist-get entry :tiled)) #'<)))
-    (and (equal (ghostel-tmux--layout-shape tree)
+    (and (ghostel-tmux--tile-root windows)
+         (equal (ghostel-tmux--layout-shape tree)
                 (ghostel-tmux--layout-shape (plist-get entry :tile-tree)))
          (equal (ghostel-tmux--tile-pids windows) tiled)
          (cl-every (lambda (w) (memq w windows))
@@ -2323,10 +2357,129 @@ as long as the layout stays the same."
          (or (equal tiled (sort (mapcar #'car (ghostel-tmux--layout-leaves tree)) #'<))
              (equal tree (plist-get entry :tile-tree))))))
 
+(defun ghostel-tmux--tile-ready-p (wid windows)
+  "Return non-nil when the tile WINDOWS of WID are as its layout is, in order."
+  (and (ghostel-tmux--tile-intact-p wid windows)
+       (not (ghostel-tmux--tile-order wid windows))))
+
 (defun ghostel-tmux--tile-placed (windows)
   "Return the alist of (PID . WINDOW) of the tile WINDOWS."
   (mapcar (lambda (w) (cons (ghostel-tmux--tile-pid w) w))
           windows))
+
+(defun ghostel-tmux--tile-tab-lines (windows)
+  "Give the top row of the tile WINDOWS a tab line, and the others none.
+A stacked window's mode line takes tmux's separator row."
+  (let ((top (window-pixel-top (ghostel-tmux--tile-root windows))))
+    (dolist (w windows)
+      (let ((format (and (> (window-pixel-top w) top) 'none)))
+        (unless (eq (window-parameter w 'tab-line-format) format)
+          (set-window-parameter w 'tab-line-format format))))))
+
+(defun ghostel-tmux--tile-adopt (windows)
+  "Make the tile WINDOWS the windows of the panes they show, if they show all.
+A swap of buffers between windows of the tile moves its panes.  Return
+non-nil when one moved."
+  (let ((shown (mapcar (lambda (w)
+                         (let ((pid (buffer-local-value 'ghostel-tmux--pane-id
+                                                        (window-buffer w))))
+                           (and pid
+                                (eq (window-buffer w) (gethash pid ghostel-tmux--panes))
+                                pid)))
+                       windows))
+        (moved nil))
+    (when (and (not (memq nil shown))
+               (equal (sort (copy-sequence shown) #'<) (ghostel-tmux--tile-pids windows)))
+      (cl-mapc (lambda (w pid)
+                 (unless (eql pid (ghostel-tmux--tile-pid w))
+                   (setq moved t)
+                   (set-window-parameter w 'ghostel-tmux-tile
+                                         (append (butlast (window-parameter
+                                                           w 'ghostel-tmux-tile))
+                                                 (list pid)))))
+               windows shown))
+    moved))
+
+(defun ghostel-tmux--layout-order (wid pids)
+  "Return the panes PIDS in the order tmux window WID has them.
+That is the order once the swaps on their way are done."
+  (let ((entry (gethash wid ghostel-tmux--windows)))
+    (or (plist-get entry :swap-order)
+        (cl-remove-if-not (lambda (pid) (memq pid pids))
+                          (mapcar #'car (ghostel-tmux--layout-leaves
+                                         (plist-get entry :tree)))))))
+
+(defun ghostel-tmux--tile-order (wid windows)
+  "Compare the order of the panes of the tile WINDOWS with tmux window WID's.
+Return nil when tmux has them in that order, `swapping' while swaps on
+their way give them that order, see `ghostel-tmux--tile-swap', else
+`other'."
+  (let ((want (mapcar #'ghostel-tmux--tile-pid windows)))
+    (cond
+     ((not (equal want (ghostel-tmux--layout-order wid want))) 'other)
+     ((plist-get (gethash wid ghostel-tmux--windows) :swap-order) 'swapping))))
+
+(defun ghostel-tmux--swap-commands (slots want &optional active)
+  "Return the `swap-pane' commands that turn the pane order SLOTS into WANT.
+The ACTIVE pane goes first, as `swap-pane -d' makes the source pane
+active when the target was."
+  (let ((slots (copy-sequence slots))
+        (commands nil))
+    (cl-loop for pid in want for i from 0 do
+             (let ((there (nth i slots)))
+               (unless (eql there pid)
+                 (push (if (eql pid active)
+                           (format "swap-pane -d -s %%%d -t %%%d" pid there)
+                         (format "swap-pane -d -s %%%d -t %%%d" there pid))
+                       commands)
+                 (setf (nth (cl-position pid slots) slots) there
+                       (nth i slots) pid))))
+    (nreverse commands)))
+
+(defun ghostel-tmux--tile-swap (wid windows)
+  "Ask tmux to order the panes of window WID as the tile WINDOWS show them.
+Runs in the controller, for a tile reordered in Emacs, as by
+`window-swap-states'.  The swaps follow those on their way; until the
+query after them is answered, :swap-order is the order they give."
+  (let* ((entry (gethash wid ghostel-tmux--windows))
+         (want (mapcar #'ghostel-tmux--tile-pid windows))
+         (query (1+ (or (plist-get entry :swap-query) 0))))
+    (dolist (command (ghostel-tmux--swap-commands
+                      (ghostel-tmux--layout-order wid want) want
+                      (if (eql wid ghostel-tmux--current-window-id)
+                          ghostel-tmux--active-pane-id
+                        (plist-get entry :active-pane))))
+      (ghostel-tmux--queue-command command))
+    (puthash wid (thread-first entry
+                               (plist-put :swap-order want)
+                               (plist-put :swap-query query))
+             ghostel-tmux--windows)
+    (ghostel-tmux--query-swaps wid query 2)))
+
+(defun ghostel-tmux--query-swaps (wid query tries)
+  "Ask for the layout of tmux window WID after the swaps of generation QUERY.
+Runs in the controller.  Its answer ends the wait for them, as does a
+failure TRIES times."
+  (ghostel-tmux--queue-command
+   (format "display-message -p -t @%d '#{window_visible_layout}'" wid)
+   (lambda (output)
+     (when-let* ((entry (gethash wid ghostel-tmux--windows)))
+       (when (eql (plist-get entry :swap-query) query)
+         (if (and (null output) (> tries 1))
+             (ghostel-tmux--query-swaps wid query (1- tries))
+           (puthash wid (plist-put entry :swap-order nil) ghostel-tmux--windows)
+           (when output
+             (ghostel-tmux--show-layout
+              wid (ghostel-tmux--parse-layout-tree (string-trim output))))))))))
+
+(defun ghostel-tmux--forget-swaps (wid)
+  "Stop waiting for the swaps of tmux window WID on their way."
+  (when-let* ((entry (gethash wid ghostel-tmux--windows)))
+    (puthash wid (thread-first entry
+                               (plist-put :swap-order nil)
+                               (plist-put :swap-query
+                                          (1+ (or (plist-get entry :swap-query) 0))))
+             ghostel-tmux--windows)))
 
 (defun ghostel-tmux--tile-update (wid)
   "Show tmux window WID as its layout says, in its tile or a window of it.
@@ -2335,17 +2488,23 @@ space, kept for a lost pane in `ghostel-tmux--auto-host-window' when it
 is part of it.  Without a tile, a window showing a pane of a WID of
 several panes gets one."
   (let* ((controller (current-buffer))
-         (tree (plist-get (gethash wid ghostel-tmux--windows) :tree))
+         (entry (gethash wid ghostel-tmux--windows))
+         (tree (plist-get entry :tree))
          (windows (ghostel-tmux--tile-windows controller wid))
          (keep (car (memq ghostel-tmux--auto-host-window windows))))
     (cond
      ((null tree)
       (when windows
         (ghostel-tmux--tile-collapse windows keep)))
-     ((and windows (ghostel-tmux--tile-intact-p wid windows))
-      (ghostel-tmux--tile-fit tree (ghostel-tmux--tile-placed windows))
-      (ghostel-tmux--note-tile-size wid windows)
-      (ghostel-tmux--tile-sync-size wid))
+     ;; While swaps are on their way, the query after them settles the
+     ;; tile; panes in another order otherwise were swapped in tmux.
+     ((and windows (ghostel-tmux--tile-intact-p wid windows)
+           (or (plist-get entry :swap-order)
+               (not (ghostel-tmux--tile-order wid windows))))
+      (unless (plist-get entry :swap-order)
+        (ghostel-tmux--tile-fit tree (ghostel-tmux--tile-placed windows))
+        (ghostel-tmux--note-tile-size wid windows)
+        (ghostel-tmux--tile-sync-size wid)))
      (windows
       (ghostel-tmux--tile-build wid (ghostel-tmux--tile-collapse windows keep))
       (ghostel-tmux--tile-sync-size wid))
@@ -2383,12 +2542,15 @@ tile resized in Emacs while TREE was on its way asks tmux for the sizes
 of its windows instead of fitting them."
   (let* ((entry (gethash wid ghostel-tmux--windows))
          (pending (plist-get entry :resize-pending))
+         (swapping (plist-get entry :swap-order))
          (windows (ghostel-tmux--tile-windows (current-buffer) wid)))
     (puthash wid (thread-first entry
                                (plist-put :tree tree)
-                               (plist-put :resize-pending nil))
+                               (plist-put :resize-pending (and swapping pending)))
              ghostel-tmux--windows)
-    (if (and pending windows (ghostel-tmux--tile-intact-p wid windows))
+    (if (and pending (not swapping) windows (ghostel-tmux--tile-ready-p wid windows)
+             (equal (ghostel-tmux--tile-size windows) (plist-get entry :tile-size))
+             (ghostel-tmux--tile-resize-commands wid windows))
         (ghostel-tmux--tile-resize-one wid windows)
       (ghostel-tmux--tile-update wid)))
   (when (ghostel-tmux--tile-windows (current-buffer) wid)
@@ -2421,7 +2583,7 @@ not count.  Return the size sent, or nil."
     (when-let* ((windows (ghostel-tmux--tile-windows (current-buffer) wid))
                 (tree (plist-get (gethash wid ghostel-tmux--windows) :tree))
                 ((not (plist-get (gethash wid ghostel-tmux--windows) :settling)))
-                ((ghostel-tmux--tile-intact-p wid windows)))
+                ((ghostel-tmux--tile-ready-p wid windows)))
       (let* ((placed (ghostel-tmux--tile-placed windows))
              (capacity (ghostel-tmux--layout-capacity
                         tree (lambda (pid) (alist-get pid placed))))
@@ -2493,6 +2655,8 @@ Without `ghostel-tmux-split-windows', windows leave their tiles."
     (when (and (window-parameter window 'ghostel-tmux-tile)
                (not (and ghostel-tmux-split-windows (ghostel-tmux--tile-leaf window))))
       (ghostel-tmux--leave-tile window)))
+  (when ghostel-tmux-split-windows
+    (ghostel-tmux--recover-members))
   (let ((tiles (ghostel-tmux--tiles)))
     (setq ghostel-tmux--tiles-exist (and tiles t))
     (pcase-dolist (`((,controller . ,wid) . ,windows) tiles)
@@ -2501,34 +2665,55 @@ Without `ghostel-tmux-split-windows', windows leave their tiles."
 
 (defun ghostel-tmux--tile-check-one (wid windows)
   "Check the tile of WINDOWS showing tmux window WID; see `--tile-check'.
-A tile waiting for its layout, see `--settle-layout', is left alone.  A
-window of the tile resized in Emacs while the tile kept its size in
-pixels, as by dragging a divider, resizes its pane, see `--tile-resize'."
+A tile waiting for its layout, see `--settle-layout', is left alone but
+for its panes moved between its windows, which move in tmux too, see
+`--tile-swap'.  A window of the tile resized in Emacs while the tile
+kept its size in pixels, as by dragging a divider, resizes its pane,
+see `--tile-resize'."
   (let* ((entry (gethash wid ghostel-tmux--windows))
-         (tree (plist-get entry :tree)))
+         (tree (plist-get entry :tree))
+         (settling (plist-get entry :settling)))
+    (when (and (ghostel-tmux--tile-adopt windows)
+               (memq (selected-window) windows))
+      (ghostel-tmux--select-pane wid (ghostel-tmux--tile-pid (selected-window))))
     (cond
      ((null tree)
       (dolist (window windows)
         (ghostel-tmux--leave-tile window)))
-     ((plist-get entry :settling))
-     ((ghostel-tmux--tile-intact-p wid windows)
-      (let* ((placed (ghostel-tmux--tile-placed windows))
-             (same (equal (ghostel-tmux--tile-size windows)
-                          (plist-get entry :tile-size))))
-        (ghostel-tmux--note-tile-size wid windows)
-        ;; A new size brings a layout, which fits the windows.
-        (unless (ghostel-tmux--tile-sync-size wid)
-          (if (and same (ghostel-tmux--tile-resize-commands wid windows))
-              (ghostel-tmux--schedule-tile-resize)
-            (ghostel-tmux--tile-fit tree placed)))))
-     ((and (null (cdr windows)) (cdr (plist-get entry :tiled)))
-      (let ((pid (ghostel-tmux--tile-pid (car windows))))
-        (if (eq (window-buffer (car windows)) (gethash pid ghostel-tmux--panes))
-            (ghostel-tmux--ensure-pane-zoomed wid pid)
-          (ghostel-tmux--leave-tile (car windows)))))
+     ((not (ghostel-tmux--tile-intact-p wid windows))
+      (cond
+       (settling)
+       ((and (null (cdr windows)) (cdr (plist-get entry :tiled)))
+        (let ((pid (ghostel-tmux--tile-pid (car windows))))
+          (if (eq (window-buffer (car windows)) (gethash pid ghostel-tmux--panes))
+              (ghostel-tmux--ensure-pane-zoomed wid pid)
+            (ghostel-tmux--leave-tile (car windows)))))
+       (t
+        (ghostel-tmux--tile-build wid (ghostel-tmux--tile-collapse windows))
+        (ghostel-tmux--tile-sync-size wid))))
      (t
-      (ghostel-tmux--tile-build wid (ghostel-tmux--tile-collapse windows))
-      (ghostel-tmux--tile-sync-size wid)))))
+      (ghostel-tmux--tile-tab-lines windows)
+      (let ((order (ghostel-tmux--tile-order wid windows))
+            (same (equal (ghostel-tmux--tile-size windows)
+                         (plist-get entry :tile-size))))
+        (cond
+         ((eq order 'other)
+          (ghostel-tmux--tile-swap wid windows))
+         (order
+          ;; Windows resized meanwhile resize their panes once the
+          ;; swaps are done.
+          (ghostel-tmux--note-tile-size wid windows)
+          (when (and same (ghostel-tmux--tile-resize-commands wid windows))
+            (puthash wid (plist-put (gethash wid ghostel-tmux--windows) :resize-pending t)
+                     ghostel-tmux--windows)))
+         (settling)
+         (t
+          (ghostel-tmux--note-tile-size wid windows)
+          ;; A new size brings a layout, which fits the windows.
+          (unless (ghostel-tmux--tile-sync-size wid)
+            (if (and same (ghostel-tmux--tile-resize-commands wid windows))
+                (ghostel-tmux--schedule-tile-resize)
+              (ghostel-tmux--tile-fit tree (ghostel-tmux--tile-placed windows)))))))))))
 
 (defvar ghostel-tmux--resize-timer nil
   "Idle timer of a pending `ghostel-tmux--tile-resize'.")
@@ -2613,13 +2798,13 @@ A drag of a divider resizes the windows many times; tmux gets the end."
 
 (defun ghostel-tmux--tile-resize ()
   "Ask tmux to give the panes of each tile the sizes of their windows.
-A tile waiting for its layout does so when the layout is there, see
-`ghostel-tmux--show-layout'."
+A tile waiting for its layout or swaps does so when the layout is there,
+see `ghostel-tmux--show-layout'."
   (setq ghostel-tmux--resize-timer nil)
   (pcase-dolist (`((,controller . ,wid) . ,windows) (ghostel-tmux--tiles))
     (with-current-buffer controller
       (let ((entry (gethash wid ghostel-tmux--windows)))
-        (if (plist-get entry :settling)
+        (if (or (plist-get entry :settling) (plist-get entry :swap-order))
             (puthash wid (plist-put entry :resize-pending t) ghostel-tmux--windows)
           (ghostel-tmux--tile-resize-one wid windows))))))
 
@@ -2628,7 +2813,7 @@ A tile waiting for its layout does so when the layout is there, see
 Runs in the controller.  The layout they bring settles the tile; one
 tmux refuses fits the windows to tmux's sizes."
   (when (and (ghostel-tmux--controller-live-p)
-             (ghostel-tmux--tile-intact-p wid windows))
+             (ghostel-tmux--tile-ready-p wid windows))
     (let ((controller (current-buffer)))
       (dolist (command (ghostel-tmux--tile-resize-commands wid windows))
         (ghostel-tmux--queue-command
@@ -3104,6 +3289,10 @@ split leaves half a pane in a full-height Emacs window."
       (let ((pane-id ghostel-tmux--pane-id)
             (window-id ghostel-tmux--window-id)
             (controller ghostel-tmux--controller-buffer))
+        ;; A window state put in WINDOW, as by `window-swap-states',
+        ;; dropped its tile.
+        (when ghostel-tmux-split-windows
+          (ghostel-tmux--recover-members))
         (cond
          ((not ghostel-tmux-split-windows)
           (ghostel--adjust-size window t)
@@ -3146,6 +3335,7 @@ split leaves half a pane in a full-height Emacs window."
 (defun ghostel-tmux--show-tile (pane-buf window)
   "Build a tile in WINDOW for the tmux window of PANE-BUF, which it shows.
 tmux is asked to switch to the pane first, which the tile then selects."
+  (ghostel-tmux--recover-members)
   (when (and (window-live-p window)
              (eq (window-buffer window) pane-buf)
              (not (ghostel-tmux--tile-leaf window)))
@@ -3471,6 +3661,71 @@ while the prompt is open, as tmux can rename a window at any time."
                            (lambda (_string) (mapcar #'buffer-name (panes))))
                           nil t))))
         (ghostel-tmux--select-pane-buffer pane)))))
+
+;;;###autoload
+(defun ghostel-tmux-restore-split ()
+  "Split the selected window's tmux window again as tmux lays it out.
+The windows of its split show their panes again, a split that lost
+windows is built again, and a zoomed pane is unzoomed.  The tmux
+window is that of the split or pane the selected window shows, else
+of the first split on its frame.  A split elsewhere moves here."
+  (interactive)
+  (unless ghostel-tmux-split-windows
+    (user-error "Ghostel-tmux: `ghostel-tmux-split-windows' is off"))
+  (let* ((window (selected-window))
+         (buf (window-buffer window))
+         (controller (buffer-local-value 'ghostel-tmux--controller-buffer buf))
+         (_ (when (and (buffer-local-value 'ghostel-tmux-pane-mode buf)
+                       (not (buffer-live-p controller)))
+              (user-error "Ghostel-tmux: This pane is detached")))
+         (tile (or (ghostel-tmux--tile-leaf window)
+                   (and (buffer-live-p controller)
+                        (buffer-local-value 'ghostel-tmux--pane-id buf)
+                        (list controller (buffer-local-value 'ghostel-tmux--window-id buf)))
+                   (cl-some #'ghostel-tmux--tile-leaf (window-list nil 'no-mini)))))
+    (unless tile
+      (user-error "Ghostel-tmux: No tmux pane here"))
+    (with-current-buffer (nth 0 tile)
+      (ghostel-tmux--restore-tile (nth 1 tile) window))))
+
+(defun ghostel-tmux--restore-tile (wid window)
+  "Show tmux window WID split as its layout says, in its tile or WINDOW.
+Runs in the controller.  WINDOW takes the tile when it is not part of
+it but shows a pane of WID; the windows of the tile showing a pane are
+deleted then."
+  (let* ((controller (current-buffer))
+         (entry (gethash wid ghostel-tmux--windows))
+         (tree (plist-get entry :tree))
+         (windows (ghostel-tmux--tile-windows controller wid)))
+    (unless tree
+      (user-error "Ghostel-tmux: Window @%d has no layout yet" wid))
+    (ghostel-tmux--forget-swaps wid)
+    (when (and (not (memq window windows))
+               (eq (buffer-local-value 'ghostel-tmux--controller-buffer (window-buffer window))
+                   controller)
+               (eql (buffer-local-value 'ghostel-tmux--window-id (window-buffer window)) wid))
+      (dolist (w windows)
+        (ghostel-tmux--leave-tile w)
+        (when (eq (buffer-local-value 'ghostel-tmux--controller-buffer (window-buffer w))
+                  controller)
+          (ignore-errors (delete-window w))))
+      (setq windows nil))
+    (dolist (w windows)
+      (when-let* ((pane (gethash (ghostel-tmux--tile-pid w) ghostel-tmux--panes)))
+        (unless (eq (window-buffer w) pane)
+          (ignore-errors (set-window-buffer w pane)))))
+    (cond
+     ((null windows)
+      (ghostel-tmux--tile-build wid window))
+     ((not (ghostel-tmux--tile-ready-p wid windows))
+      (ghostel-tmux--tile-build wid (ghostel-tmux--tile-collapse
+                                     windows (car (memq window windows))))))
+    ;; The visible layout of a zoomed window is the zoomed pane.
+    (if (and (plist-get entry :zoomed) (null (cdr (ghostel-tmux--layout-leaves tree))))
+        (ghostel-tmux--queue-command
+         (format "resize-pane -Z -t %%%d" (car (car (ghostel-tmux--layout-leaves tree)))))
+      (ghostel-tmux--selection-change (selected-frame))
+      (ghostel-tmux--tile-sync-size wid))))
 
 
 ;; One-shot snapshot of a single pane (no live connection)
