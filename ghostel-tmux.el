@@ -108,12 +108,11 @@ value applies to the windows shown already."
 (defcustom ghostel-tmux-keep-detached-panes 'ended
   "Whether the pane buffers of a session that left Emacs stay, read-only.
 With `ended', they stay when the session ended, as after its last shell
-exited or tmux was killed, and go after a detach, as the session goes
-on in tmux and attaching again shows its panes.  A session whose end
-is not known counts as ended: one not detached from Emacs that was a
-takeover, on another host, or whose client was killed in Emacs.  t
-keeps them always, nil never.  A split of their windows collapses to
-one window."
+exited or tmux was killed, and go after a detach, as the session goes on in
+tmux and attaching again shows its panes.  A session whose end is not known
+counts as ended: one not detached from Emacs that was a takeover, on another
+host, or whose client was killed in Emacs.  t keeps them always, nil never.
+A split of their windows collapses to one window."
   :type '(choice (const :tag "When the session ended" ended)
                  (const :tag "Always" t)
                  (const :tag "Never" nil))
@@ -3111,9 +3110,8 @@ this buffer, nil when the takeover is declined."
 
 (defun ghostel-tmux--dcs-data (data)
   "Handle a chunk of tmux DCS body bytes (DATA).
-Forwards to the control-mode parser only when this buffer is
-currently inside a DCS frame we entered via
-`ghostel-tmux--dcs-enter'."
+Forwards to the control-mode parser only when this buffer is currently
+currently inside a DCS frame we entered via `ghostel-tmux--dcs-enter'."
   (when ghostel-tmux--dcs-active
     (ghostel-tmux--feed-bytes data)))
 
@@ -3220,10 +3218,9 @@ read-only snapshots or killed, see `ghostel-tmux-keep-detached-panes'."
 (defun ghostel-tmux--host-exited (buf _event)
   "End control mode when the auto-takeover host BUF's shell dies.
 Runs from `ghostel-exit-functions' (added buffer-locally on control-mode
-entry): with the host process gone there is no control channel left, so
-the panes are sealed read-only or killed, see
-`ghostel-tmux--exit-control-mode', and the host reverts to a plain
-buffer."
+entry): with the host process gone there is no control channel left, so the
+panes are sealed read-only or killed, see `ghostel-tmux--exit-control-mode',
+and the host reverts to a plain buffer."
   (when (buffer-live-p buf)
     (with-current-buffer buf
       (when ghostel-tmux--dcs-active
@@ -3504,10 +3501,9 @@ panes."
 (defun ghostel-tmux--on-window-buffer-change (window)
   "Resize the pane terminal when this buffer becomes WINDOW's content.
 Hook for `window-buffer-change-functions': covers tab-line clicks and
-any other path that swaps the buffer into a window without going
-through `ghostel-tmux--display-pane-in-window'.  From Emacs 31 the hook
-runs in its buffer, also for the buffer WINDOW lost; before, in whatever
-buffer is current."
+any other path that swaps the buffer into a window without going through
+`ghostel-tmux--display-pane-in-window'.  From Emacs 31 the hook runs in its
+buffer, also for the buffer WINDOW lost; before, in whatever buffer is current."
   (when (and (window-live-p window)
              (or (< emacs-major-version 31)
                  (eq (window-buffer window) (current-buffer))))
@@ -3533,9 +3529,9 @@ takes its place, recorded as active so that showing it selects nothing."
   "Block up to TIMEOUT seconds for CONTROL-BUF to materialize a pane.
 Switches the selected window to tmux's active pane when one appears,
 or to the first pane while the active one is unknown.  A current window
-of floating panes only keeps the selected window for a window it moves
-to.  A tmux that dies ends the wait; the sentinel reports it.  A pane
-later than TIMEOUT still gets the window."
+of floating panes only keeps the selected window for a window it moves to.
+A tmux that dies ends the wait; the sentinel reports it.
+A pane later than TIMEOUT still gets the window."
   (let ((target-window (selected-window))
         (deadline (+ (float-time) timeout))
         (proc (buffer-local-value 'ghostel-tmux--controller-process
@@ -3603,8 +3599,8 @@ SESSION is an exact name.  tmux cannot address a name that starts with
 (defun ghostel-tmux-new (session)
   "Create or attach to tmux SESSION via control mode.
 An existing session is attached like in `ghostel-tmux-attach', as
-`new-session -A' reaches it by a raw target; otherwise `tmux -CC
-new-session -As' creates it."
+`new-session -A' reaches it by a raw target;
+otherwise `tmux -CC new-session -As' creates it."
   (interactive (list (read-string "tmux session name: " "main")))
   (when (string-empty-p session)
     (user-error "Ghostel-tmux: Empty session name"))
@@ -3622,10 +3618,9 @@ new-session -As' creates it."
   "Detach the current tmux session.
 For sessions started via `ghostel-tmux-attach' or `ghostel-tmux-new',
 kills the dedicated control-mode subprocess.  For sessions taken over
-from an existing ghostel shell (takeover), sends `detach-client'
-and lets tmux exit control mode cleanly so the underlying shell
-continues running.  The pane buffers go, see
-`ghostel-tmux-keep-detached-panes'."
+from an existing ghostel shell (takeover), sends `detach-client' and lets
+tmux exit control mode cleanly so the underlying shell continues running.
+The pane buffers go, see `ghostel-tmux-keep-detached-panes'."
   (interactive)
   (let ((controller (ghostel-tmux--active-controller)))
     (unless (buffer-live-p controller)
@@ -3750,9 +3745,8 @@ of the first split on its frame.  A split elsewhere moves here."
 
 (defun ghostel-tmux--restore-tile (wid window)
   "Show tmux window WID split as its layout says, in its tile or WINDOW.
-Runs in the controller.  WINDOW takes the tile when it is not part of
-it but shows a pane of WID; the windows of the tile showing a pane are
-deleted then."
+Runs in the controller.  WINDOW takes the tile when it is not part of it but
+shows a pane of WID; the windows of the tile showing a pane are deleted then."
   (let* ((controller (current-buffer))
          (entry (gethash wid ghostel-tmux--windows))
          (tree (plist-get entry :tree))
