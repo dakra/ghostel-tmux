@@ -3297,16 +3297,9 @@ A non-zero exit (no server running) counts as no sessions."
      ((= (length sessions) 1) (car sessions))
      (t (completing-read "tmux session: " sessions nil t nil nil default)))))
 
-(defun ghostel-tmux--load-module ()
-  "Load ghostel's native module, or signal `user-error' without it.
-`ghostel--load-module' returns normally when the user skips the install."
-  (ghostel--load-module t)
-  (unless (fboundp 'ghostel--new)
-    (user-error "Ghostel-tmux: The native ghostel module is not available")))
-
 (defun ghostel-tmux--check-spawn ()
   "Signal `user-error' when no controller can start in `default-directory'."
-  (ghostel-tmux--load-module)
+  (ghostel--load-module t)
   ;; A remote shell that cannot `cd' there stays alive at its prompt.
   (unless (file-directory-p default-directory)
     (user-error "Ghostel-tmux: No directory %s" default-directory)))
@@ -3805,7 +3798,7 @@ connected to a live tmux session."
   (interactive
    (list (read-string "tmux target (e.g. mysession:0.0 or %3): "
                       (or (ghostel-tmux--prefix-target) ""))))
-  (ghostel-tmux--load-module)
+  (ghostel--load-module t)
   (let* ((status nil)
          (output
           (with-output-to-string

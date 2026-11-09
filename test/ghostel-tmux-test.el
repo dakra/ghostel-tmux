@@ -601,8 +601,7 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-attach-targets-the-exact-session ()
   (let (args)
-    (cl-letf (((symbol-function 'ghostel-tmux--load-module) #'ignore)
-              ((symbol-function 'ghostel-tmux--spawn-controller)
+    (cl-letf (((symbol-function 'ghostel-tmux--spawn-controller)
                (lambda (session tmux-args) (setq args (cons session tmux-args))))
               ((symbol-function 'ghostel-tmux--wait-for-pane) #'ignore))
       (ghostel-tmux-attach "proj.0")
@@ -610,8 +609,7 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-new-escapes-the-session-format ()
   (let (args)
-    (cl-letf (((symbol-function 'ghostel-tmux--load-module) #'ignore)
-              ((symbol-function 'ghostel-tmux--session-exists-p) #'ignore)
+    (cl-letf (((symbol-function 'ghostel-tmux--session-exists-p) #'ignore)
               ((symbol-function 'ghostel-tmux--spawn-controller)
                (lambda (session tmux-args) (setq args (cons session tmux-args))))
               ((symbol-function 'ghostel-tmux--wait-for-pane) #'ignore))
@@ -620,8 +618,7 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-new-attaches-an-existing-session-exactly ()
   (let (args)
-    (cl-letf (((symbol-function 'ghostel-tmux--load-module) #'ignore)
-              ((symbol-function 'ghostel-tmux--session-exists-p) #'always)
+    (cl-letf (((symbol-function 'ghostel-tmux--session-exists-p) #'always)
               ((symbol-function 'ghostel-tmux--spawn-controller)
                (lambda (session tmux-args) (setq args (cons session tmux-args))))
               ((symbol-function 'ghostel-tmux--wait-for-pane) #'ignore))
@@ -630,8 +627,8 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-new-loads-the-module-once ()
   (let ((loaded 0))
-    (cl-letf (((symbol-function 'ghostel-tmux--load-module)
-               (lambda () (cl-incf loaded)))
+    (cl-letf (((symbol-function 'ghostel--load-module)
+               (lambda (&optional _prompt) (cl-incf loaded)))
               ((symbol-function 'ghostel-tmux--session-exists-p) #'always)
               ((symbol-function 'ghostel-tmux--spawn-controller) #'ignore)
               ((symbol-function 'ghostel-tmux--wait-for-pane) #'ignore))
@@ -641,8 +638,7 @@ fills its output queue between the two repeats the CR."
 (ert-deftest ghostel-tmux-test-new-checks-the-directory-first ()
   (let ((default-directory "/nonexistent/directory/")
         (asked nil))
-    (cl-letf (((symbol-function 'ghostel-tmux--load-module) #'ignore)
-              ((symbol-function 'ghostel-tmux--session-exists-p)
+    (cl-letf (((symbol-function 'ghostel-tmux--session-exists-p)
                (lambda (_session) (setq asked t))))
       (should-error (ghostel-tmux-new "x") :type 'user-error)
       (should-not asked))))
@@ -2257,9 +2253,8 @@ tmux resizes that screen when the pane leaves the alternate one."
     (cl-letf (((symbol-function 'ghostel--load-module)
                (lambda (&optional prompt)
                  (should prompt)
-                 (cl-incf prompted)))
-              ;; Skipping the install is no error in ghostel.
-              ((symbol-function 'ghostel--new) nil)
+                 (cl-incf prompted)
+                 (user-error "No module")))
               ((symbol-function 'make-process)
                (lambda (&rest _) (error "Started a process")))
               ((symbol-function 'process-file)
@@ -2293,8 +2288,7 @@ tmux resizes that screen when the pane leaves the alternate one."
 
 (ert-deftest ghostel-tmux-test-attach-needs-the-directory ()
   "A directory that is gone stops the spawn, also on a remote host."
-  (cl-letf (((symbol-function 'ghostel-tmux--load-module) #'ignore)
-            ((symbol-function 'make-process)
+  (cl-letf (((symbol-function 'make-process)
              (lambda (&rest _) (error "Started a process"))))
     (let ((buffers (buffer-list))
           (default-directory "/nonexistent/directory/"))
