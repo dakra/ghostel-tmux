@@ -580,7 +580,6 @@ window first."
       (unless keep
         (kill-buffer buf)))))
 
-;;;###autoload
 (defun ghostel-tmux-reset ()
   "Reset the tmux session this buffer belongs to.
 Kills a dedicated `tmux -CC' subprocess or exits control mode in an
@@ -3626,7 +3625,6 @@ new-session -As' creates it."
       (list "new-session" "-As" (ghostel-tmux--literal-format session))))
    5.0))
 
-;;;###autoload
 (defun ghostel-tmux-detach ()
   "Detach the current tmux session.
 For sessions started via `ghostel-tmux-attach' or `ghostel-tmux-new',
@@ -3666,13 +3664,11 @@ continues running.  The pane buffers go, see
           ;; `ghostel-tmux--exit-control-mode' tears down pane state.
           nil))))))
 
-;;;###autoload
 (defun ghostel-tmux-next-pane ()
   "Switch to the next tmux pane in this session."
   (interactive)
   (ghostel-tmux--cycle-pane 1))
 
-;;;###autoload
 (defun ghostel-tmux-prev-pane ()
   "Switch to the previous tmux pane in this session."
   (interactive)
@@ -3715,7 +3711,6 @@ The visible switch follows tmux's reports."
           (ghostel-tmux--cancel-zooming wid pid)))
       (ghostel-tmux--send-selection controller wid pid))))
 
-;;;###autoload
 (defun ghostel-tmux-switch-pane ()
   "Switch to a sibling pane via `completing-read'.
 The visible switch follows tmux's reports.  The choices stay current
@@ -3735,7 +3730,6 @@ while the prompt is open, as tmux can rename a window at any time."
                           nil t))))
         (ghostel-tmux--select-pane-buffer pane)))))
 
-;;;###autoload
 (defun ghostel-tmux-restore-split ()
   "Split the selected window's tmux window again as tmux lays it out.
 The windows of its split show their panes again, a split that lost
