@@ -4,8 +4,8 @@
 
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/ghostel-tmux
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.62.0"))
+;; Version: 0.2.0
+;; Package-Requires: ((emacs "28.1") (ghostel "0.64.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
