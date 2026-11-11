@@ -209,6 +209,47 @@ SPEC is (BUFFER TERM)."
       (when (buffer-live-p pane) (kill-buffer pane))
       (kill-buffer ctl))))
 
+(ert-deftest ghostel-tmux-integration-pane-outlives-a-deleted-directory ()
+  "A pane is made when the directory of its controller is gone."
+  :tags '(native)
+  (let ((ctl (generate-new-buffer " *ghostel-tmux-int-ctl*"))
+        pane)
+    (unwind-protect
+        (progn
+          (with-current-buffer ctl
+            (ghostel-tmux-control-mode)
+            (setq default-directory "/nonexistent/directory/"))
+          (setq pane (ghostel-tmux--get-or-create-pane ctl 1 0 "w"))
+          (should (eq pane (gethash 1 (buffer-local-value 'ghostel-tmux--panes ctl))))
+          (should (equal (with-current-buffer pane (ghostel-terminal-size))
+                         (cons ghostel-tmux-default-cols ghostel-tmux-default-rows))))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (kill-buffer ctl))))
+
+(ert-deftest ghostel-tmux-integration-pane-output-sends-no-replies ()
+  "A query in a pane's `%output' gets no reply from its terminal; tmux answers."
+  :tags '(native)
+  (let ((ctl (generate-new-buffer " *ghostel-tmux-int-ctl*"))
+        (sent nil)
+        pane)
+    (unwind-protect
+        (progn
+          (with-current-buffer ctl
+            (ghostel-tmux-control-mode))
+          (setq pane (ghostel-tmux--get-or-create-pane ctl 1 0 "w"))
+          (with-current-buffer pane
+            (setq ghostel-tmux--initialized t
+                  ghostel-pty-out-function (lambda (data) (push data sent))))
+          (with-current-buffer ctl
+            (ghostel-tmux--on-output 1 "\\033[c\\033[6n"))
+          (should-not sent)
+          ;; The same queries written otherwise are answered.
+          (with-current-buffer pane
+            (ghostel-write-output "\e[c\e[6n"))
+          (should sent))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (kill-buffer ctl))))
+
 (ert-deftest ghostel-tmux-integration-sealed-pane-leaves-mouse-to-emacs ()
   "A sealed pane whose program tracked the mouse scrolls and selects again."
   :tags '(native)

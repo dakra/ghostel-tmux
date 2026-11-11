@@ -17,7 +17,7 @@
 (defvar ghostel-control-mode-function)
 
 ;; The unit tests run without the native module.
-(advice-add 'ghostel--load-module :override #'ignore)
+(advice-add 'ghostel-ensure-module :override #'ignore)
 (unless (fboundp 'ghostel--new)
   (defalias 'ghostel--new #'ignore))
 
@@ -547,57 +547,53 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-new-pane-outlives-a-deleted-directory ()
   (ghostel-tmux-test--with-controller ctl
-    (let (dir buf)
+    (let (buf)
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--init-buffer)
-                     (lambda (b &rest _)
-                       (setq dir (buffer-local-value 'default-directory b)))))
+          (cl-letf (((symbol-function 'ghostel-make-terminal)
+                     (lambda (name &rest _) (generate-new-buffer name))))
             (setq default-directory "/nonexistent/directory/")
             (setq buf (ghostel-tmux--get-or-create-pane ctl 5 0))
-            (should (equal (expand-file-name "~/") dir))
+            (should (equal (expand-file-name "~/")
+                           (buffer-local-value 'default-directory buf)))
             (should (eq buf (gethash 5 ghostel-tmux--panes))))
         (setq default-directory (expand-file-name "~/"))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (ert-deftest ghostel-tmux-test-new-pane-keeps-a-local-directory ()
   (ghostel-tmux-test--with-controller ctl
-    (let ((home (expand-file-name "~/"))
-          (kept temporary-file-directory)
-          dir buf)
+    (let ((kept temporary-file-directory)
+          buf)
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--init-buffer)
-                     (lambda (b &rest _)
-                       (setq dir (buffer-local-value 'default-directory b)))))
+          (cl-letf (((symbol-function 'ghostel-make-terminal)
+                     (lambda (name &rest _) (generate-new-buffer name))))
             (setq default-directory kept)
             (setq buf (ghostel-tmux--get-or-create-pane ctl 5 0))
-            (should (equal kept dir))
-            (should-not (equal home dir)))
+            (should (equal kept (buffer-local-value 'default-directory buf))))
+        (setq default-directory (expand-file-name "~/"))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (ert-deftest ghostel-tmux-test-new-pane-keeps-a-remote-directory ()
   (ghostel-tmux-test--with-controller ctl
-    (let (dir buf)
+    (let (buf)
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--init-buffer)
-                     (lambda (b &rest _)
-                       (setq dir (buffer-local-value 'default-directory b))))
+          (cl-letf (((symbol-function 'ghostel-make-terminal)
+                     (lambda (name &rest _) (generate-new-buffer name)))
                     ((symbol-function 'file-directory-p)
                      (lambda (_) (error "Asked the remote host")))
                     ((symbol-function 'file-remote-p) #'always))
             (setq default-directory "/ssh:host:/tmp/")
             (setq buf (ghostel-tmux--get-or-create-pane ctl 5 0))
-            (should (equal "/ssh:host:/tmp/" dir)))
+            (should (equal "/ssh:host:/tmp/"
+                           (buffer-local-value 'default-directory buf))))
         (setq default-directory (expand-file-name "~/"))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (ert-deftest ghostel-tmux-test-failed-pane-leaves-nothing ()
   (ghostel-tmux-test--with-controller ctl
-    (cl-letf (((symbol-function 'ghostel--init-buffer)
+    (cl-letf (((symbol-function 'ghostel-make-terminal)
                (lambda (&rest _) (error "No terminal"))))
-      (let ((buffers (buffer-list)))
-        (should-error (ghostel-tmux--get-or-create-pane ctl 5 0))
-        (should-not (gethash 5 ghostel-tmux--panes))
-        (should (equal buffers (buffer-list)))))))
+      (should-error (ghostel-tmux--get-or-create-pane ctl 5 0))
+      (should-not (gethash 5 ghostel-tmux--panes)))))
 
 (ert-deftest ghostel-tmux-test-attach-targets-the-exact-session ()
   (let (args)
@@ -627,8 +623,8 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-new-loads-the-module-once ()
   (let ((loaded 0))
-    (cl-letf (((symbol-function 'ghostel--load-module)
-               (lambda (&optional _prompt) (cl-incf loaded)))
+    (cl-letf (((symbol-function 'ghostel-ensure-module)
+               (lambda () (cl-incf loaded)))
               ((symbol-function 'ghostel-tmux--session-exists-p) #'always)
               ((symbol-function 'ghostel-tmux--spawn-controller) #'ignore)
               ((symbol-function 'ghostel-tmux--wait-for-pane) #'ignore))
@@ -1109,10 +1105,9 @@ fills its output queue between the two repeats the CR."
           (existing-pane (generate-new-buffer "*ghostel-tmux:s:w%0*"))
           (created-pane nil))
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
-                     (lambda (_term rows cols)
+          (cl-letf (((symbol-function 'ghostel-set-size)
+                     (lambda (rows cols)
                        (push (cons cols rows) sizes)))
-                    ((symbol-function 'ghostel--commit-frame) #'ignore)
                     ;; Pretend pane %0 is not visible in any window
                     ;; (tests run in batch mode without windows).
                     ((symbol-function 'get-buffer-window-list)
@@ -1153,9 +1148,8 @@ fills its output queue between the two repeats the CR."
     (let ((sizes nil)
           (visible-pane (generate-new-buffer "*ghostel-tmux:visible%0*")))
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
-                     (lambda (_t rows cols) (push (cons cols rows) sizes)))
-                   ((symbol-function 'ghostel--commit-frame) #'ignore)
+          (cl-letf (((symbol-function 'ghostel-set-size)
+                     (lambda (rows cols) (push (cons cols rows) sizes)))
                     ((symbol-function 'get-buffer-window-list)
                      (lambda (buf &rest _)
                        (when (eq buf visible-pane) '(fake-window))))
@@ -1343,9 +1337,7 @@ fills its output queue between the two repeats the CR."
                                                  ghostel-tmux--initialized t))
                                    (puthash pid b ghostel-tmux--panes)
                                    b)))))
-                    ((symbol-function 'ghostel--set-size-with-cell-dims)
-                     (lambda (&rest _) nil))
-                   ((symbol-function 'ghostel--commit-frame) #'ignore)
+                    ((symbol-function 'ghostel-set-size) #'ignore)
                     ((symbol-function 'get-buffer-window-list)
                      (lambda (&rest _) nil))
                     ((symbol-function 'ghostel-tmux--follow-active-pane)
@@ -1382,19 +1374,14 @@ fills its output queue between the two repeats the CR."
           (with-current-buffer ctl
             (setq-local ghostel-tmux--controller-process 'fake-proc))
           (with-current-buffer pane
-            (setq-local ghostel-tmux--controller-buffer ctl
-                        ghostel--term-cols 80
-                        ghostel--term-rows 24
-                        ghostel--term 'fake-term)
-            (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
+            (setq-local ghostel-tmux--controller-buffer ctl)
+            (cl-letf (((symbol-function 'ghostel-set-size)
                        (lambda (&rest args) (setq resized args)))
                       ((symbol-function 'process-live-p) (lambda (_) t))
                       ((symbol-function 'process-send-string)
                        (lambda (_proc s) (push s sent))))
               (ghostel-tmux--resize-pane 40 120))
-            (should (equal resized '(fake-term 40 120)))
-            (should (equal ghostel--term-cols 120))
-            (should (equal ghostel--term-rows 40))
+            (should (equal resized '(40 120)))
             (should (equal sent '("refresh-client -C 120,40\n")))))
       (kill-buffer pane)
       (kill-buffer ctl))))
@@ -1402,11 +1389,10 @@ fills its output queue between the two repeats the CR."
 (ert-deftest ghostel-tmux-test-resize-pane-without-controller-resizes-locally ()
   (with-temp-buffer
     (let ((resized nil))
-      (setq-local ghostel--term 'fake-term)
-      (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
+      (cl-letf (((symbol-function 'ghostel-set-size)
                  (lambda (&rest args) (setq resized args))))
         (ghostel-tmux--resize-pane 40 120))
-      (should (equal resized '(fake-term 40 120))))))
+      (should (equal resized '(40 120))))))
 
 (ert-deftest ghostel-tmux-test-on-window-buffer-change-resizes ()
   ;; The window-buffer-change hook routes through `--apply-pane-size'.
@@ -1529,7 +1515,7 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-detach-auto-takeover-preserves-process ()
   ;; Auto-takeover host: the control stream rides the user's shell PTY,
-  ;; so detach must send detach-client through `ghostel--write-pty' and
+  ;; so detach must send detach-client through the host's terminal and
   ;; NOT delete any process.
   (let ((host (generate-new-buffer "*tmux-host-test*")))
     (unwind-protect
@@ -1539,8 +1525,8 @@ fills its output queue between the two repeats the CR."
             (setq ghostel-tmux--dcs-active t
                   ghostel-tmux--panes (make-hash-table)
                   ghostel--term 'fake-term))
-          (cl-letf (((symbol-function 'ghostel--write-pty)
-                     (lambda (_term s) (push s sent)))
+          (cl-letf (((symbol-function 'ghostel-send-string)
+                     (lambda (s &optional raw) (should raw) (push s sent)))
                     ((symbol-function 'delete-process)
                      (lambda (p) (setq deleted p))))
             (with-current-buffer host
@@ -1600,9 +1586,8 @@ fills its output queue between the two repeats the CR."
     (let ((pane (generate-new-buffer "*ghostel-tmux:pre-init%0*"))
           (written nil))
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--write-vt)
-                     (lambda (_term data) (push data written)))
-                    ((symbol-function 'ghostel--invalidate) #'ignore))
+          (cl-letf (((symbol-function 'ghostel-write-output)
+                     (lambda (data &optional _no-reply) (push data written))))
             (with-current-buffer pane
               (setq-local ghostel--term 'fake))
             (with-current-buffer ctl
@@ -1623,9 +1608,8 @@ fills its output queue between the two repeats the CR."
     (let ((pane (generate-new-buffer "*ghostel-tmux:raw%0*"))
           (written nil))
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--write-vt)
-                     (lambda (_term data) (push data written)))
-                    ((symbol-function 'ghostel--invalidate) #'ignore))
+          (cl-letf (((symbol-function 'ghostel-write-output)
+                     (lambda (data &optional _no-reply) (push data written))))
             (with-current-buffer pane
               (setq-local ghostel--term 'fake))
             (with-current-buffer ctl
@@ -2250,9 +2234,8 @@ tmux resizes that screen when the pane leaves the alternate one."
   "Without the module an entry point stops before anything is started."
   (let ((prompted 0)
         (started nil))
-    (cl-letf (((symbol-function 'ghostel--load-module)
-               (lambda (&optional prompt)
-                 (should prompt)
+    (cl-letf (((symbol-function 'ghostel-ensure-module)
+               (lambda ()
                  (cl-incf prompted)
                  (user-error "No module")))
               ((symbol-function 'make-process)
@@ -2671,8 +2654,8 @@ tmux resizes that screen when the pane leaves the alternate one."
   (let ((written nil) (live t))
     (cl-letf (((symbol-function 'ghostel-tmux--exit-control-mode) #'ignore)
               ((symbol-function 'process-live-p) (lambda (_p) live))
-              ((symbol-function 'ghostel--write-pty)
-               (lambda (_term data) (push data written))))
+              ((symbol-function 'ghostel-send-string)
+               (lambda (data &optional raw) (should raw) (push data written))))
       (with-temp-buffer
         (setq-local ghostel--term 'fake)
         (setq ghostel-tmux--dcs-active t)
@@ -2698,9 +2681,8 @@ tmux resizes that screen when the pane leaves the alternate one."
   (ghostel-tmux-test--with-controller ctl
     (let ((pane (generate-new-buffer " pane")) (written nil))
       (unwind-protect
-          (cl-letf (((symbol-function 'ghostel--write-vt)
-                     (lambda (_term data) (push data written)))
-                    ((symbol-function 'ghostel--invalidate) #'ignore))
+          (cl-letf (((symbol-function 'ghostel-write-output)
+                     (lambda (data &optional _no-reply) (push data written))))
             (puthash 5 pane ghostel-tmux--panes)
             (with-current-buffer pane
               (setq-local ghostel--term 'fake)
@@ -2752,48 +2734,27 @@ tmux resizes that screen when the pane leaves the alternate one."
   (should (equal (ghostel-tmux--bytes-to-hex "ä")
                  "c3 a4")))
 
-(ert-deftest ghostel-tmux-test-send-bytes-suppressed-during-write-vt ()
+(ert-deftest ghostel-tmux-test-pane-output-drops-replies ()
   ;; Regression: OSC/DA/cursor query replies generated while feeding
   ;; %output to a pane's VT engine would round-trip through send-keys,
   ;; arrive at the pane's stdin after the asking program had exited,
-  ;; and leak into the next shell prompt as typed input.  The fix is
-  ;; to drop those bytes when `--in-write-vt' is non-nil.
-  (ghostel-tmux-test--with-controller ctl
-    (let ((sent nil))
-      (with-current-buffer ctl
-        (setq ghostel-tmux--controller-process 'fake-proc))
-      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                ((symbol-function 'process-send-string)
-                 (lambda (_p s) (push s sent))))
-        (let ((ghostel-tmux--in-write-vt t))
-          (ghostel-tmux--send-bytes-from-pane ctl 0 "\e]10;rgb:c6c6/c6c6/c6c6\e\\"))
-        (should (null sent))
-        (let ((ghostel-tmux--in-write-vt nil))
-          (ghostel-tmux--send-bytes-from-pane ctl 0 "abc"))
-        (should sent)))))
-
-(ert-deftest ghostel-tmux-test-on-output-binds-write-vt-flag ()
-  ;; The flag must be set during `--on-output' so the override sees
-  ;; it for any reply triggered by feeding the pane.
+  ;; and leak into the next shell prompt as typed input.
   (ghostel-tmux-test--with-controller ctl
     (let ((pane (generate-new-buffer "*ghostel-tmux:wi%0*"))
-          (saw-flag nil))
+          (no-replies nil))
       (unwind-protect
           (progn
             (with-current-buffer pane
-              (setq-local ghostel--term 'fake-term
-                          ghostel-tmux--initialized t))
-            (with-current-buffer ctl
-              (puthash 0 pane ghostel-tmux--panes))
-            (cl-letf (((symbol-function 'ghostel--write-vt)
-                       (lambda (_term _data)
-                         (setq saw-flag ghostel-tmux--in-write-vt)))
-                      ((symbol-function 'ghostel--invalidate) #'ignore))
-              (with-current-buffer ctl
-                (ghostel-tmux--on-output 0 "anything"))
-              (should saw-flag))
-            ;; After the call returns, the flag is back to nil.
-            (should-not ghostel-tmux--in-write-vt))
+              (setq-local ghostel-tmux--initialized t))
+            (puthash 0 pane ghostel-tmux--panes)
+            (cl-letf (((symbol-function 'ghostel-write-output)
+                       (lambda (_data &optional no-reply)
+                         (push no-reply no-replies))))
+              (ghostel-tmux--on-output 0 "anything")
+              (with-current-buffer pane
+                (setq ghostel-tmux--initialized nil))
+              (ghostel-tmux--receive-pane-backfill ctl 0 nil nil "rows" nil))
+            (should (equal no-replies '(t t))))
         (when (buffer-live-p pane) (kill-buffer pane))))))
 
 (ert-deftest ghostel-tmux-test-ensure-pane-zoomed-skips-single-pane ()
@@ -4029,8 +3990,8 @@ SPEC is (FOLLOWED): that variable collects followed panes."
   (ghostel-tmux-test--with-host host
     (let ((sent nil)
           (rows nil))
-      (cl-letf (((symbol-function 'ghostel--write-pty)
-                 (lambda (_term data) (push data sent)))
+      (cl-letf (((symbol-function 'ghostel-send-string)
+                 (lambda (data &optional raw) (should raw) (push data sent)))
                 ((symbol-function 'ghostel-tmux--receive-window-rows)
                  (lambda (output _seed) (push output rows))))
         (setq-local ghostel--term 'fake-term)
@@ -4104,12 +4065,32 @@ display-message -p %s\n"
                 ghostel--term 'fake-term)
           (cl-letf (((symbol-function 'ghostel-tmux--exit-control-mode)
                      (lambda (b) (setq exited-buf b)))
+                    ((symbol-function 'ghostel--on-user-input)
+                     (lambda () (ert-fail "counted as typed")))
                     ((symbol-function 'ghostel--write-pty)
-                     (lambda (term data) (setq sent (cons term data)))))
+                     (lambda (term data) (setq sent (list term data)))))
             (ghostel-tmux-reset))
           (should-not ghostel-tmux--dcs-active)
           (should (eq exited-buf buf))
-          (should (equal sent '(fake-term . "\n"))))
+          (should (equal sent '(fake-term "\n"))))
+      (kill-buffer buf))))
+
+(ert-deftest ghostel-tmux-test-takeover-commands-go-out-raw ()
+  ;; In the takeover the host's terminal carries the commands; they are
+  ;; not typed input, which would scroll the host or end its copy mode.
+  (let ((buf (generate-new-buffer "*takeover-host*"))
+        sent)
+    (unwind-protect
+        (with-current-buffer buf
+          (ghostel-mode)
+          (setq ghostel-tmux--dcs-active t
+                ghostel--term 'fake-term)
+          (cl-letf (((symbol-function 'ghostel--on-user-input)
+                     (lambda () (ert-fail "counted as typed")))
+                    ((symbol-function 'ghostel--write-pty)
+                     (lambda (term data) (setq sent (list term data)))))
+            (ghostel-tmux--controller-send "list-windows\n"))
+          (should (equal sent '(fake-term "list-windows\n"))))
       (kill-buffer buf))))
 
 (ert-deftest ghostel-tmux-test-reset-without-session-errors ()
@@ -4181,9 +4162,9 @@ display-message -p %s\n"
     (unwind-protect
         (cl-letf (((symbol-function 'process-file)
                    (lambda (&rest _) (insert "row\n") 0))
-                  ((symbol-function 'ghostel--init-buffer) #'ignore)
-                  ((symbol-function 'ghostel--write-vt) #'ignore)
-                  ((symbol-function 'ghostel--invalidate) #'ignore)
+                  ((symbol-function 'ghostel-make-terminal)
+                   (lambda (name &rest _) (generate-new-buffer name)))
+                  ((symbol-function 'ghostel-write-output) #'ignore)
                   ((symbol-function 'pop-to-buffer)
                    (lambda (b) (setq buf b))))
           (ghostel-tmux-capture "s:0.0")
@@ -4199,8 +4180,8 @@ display-message -p %s\n"
   (let ((host (generate-new-buffer "*tmux-host-closing*"))
         (sent nil))
     (unwind-protect
-        (cl-letf (((symbol-function 'ghostel--write-pty)
-                   (lambda (_term s) (push s sent))))
+        (cl-letf (((symbol-function 'ghostel-send-string)
+                   (lambda (s &optional raw) (should raw) (push s sent))))
           (with-current-buffer host
             (ghostel-mode)
             (setq ghostel-tmux--dcs-active t
@@ -4249,77 +4230,78 @@ display-message -p %s\n"
     (should-not ghostel-tmux--closing)))
 
 (ert-deftest ghostel-tmux-test-resize-pane-commits-before-reporting ()
-  ;; The terminal commits a resize on its next redraw and clears the
-  ;; prompt row then.  That has to happen before tmux hears of the
-  ;; size, or it would clear the prompt the shell repaints.
+  ;; The terminal clears the prompt row when it commits a resize.  That
+  ;; has to happen before tmux hears of the size, or it would clear the
+  ;; prompt the shell repaints; `ghostel-set-size' commits at once.
   (let ((ctl (generate-new-buffer "*ghostel-tmux:commit-ctl%0*"))
         (events nil))
     (unwind-protect
         (with-temp-buffer
           (with-current-buffer ctl
             (setq-local ghostel-tmux--controller-process 'fake-proc))
-          (setq-local ghostel-tmux--controller-buffer ctl
-                      ghostel--term 'fake-term)
-          (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
+          (setq-local ghostel-tmux--controller-buffer ctl)
+          (cl-letf (((symbol-function 'ghostel-set-size)
                      (lambda (&rest _) (push 'resize events)))
-                    ((symbol-function 'ghostel--redraw-now)
-                     (lambda (_buffer force)
-                       (should force)
-                       (push 'redraw events)))
                     ((symbol-function 'process-live-p) (lambda (_) t))
                     ((symbol-function 'process-send-string)
                      (lambda (&rest _) (push 'report events))))
             (ghostel-tmux--resize-pane 40 120))
-          (should (equal (nreverse events) '(resize redraw report))))
+          (should (equal (nreverse events) '(resize report))))
       (kill-buffer ctl))))
 
-(ert-deftest ghostel-tmux-test-resize-pane-same-size-does-not-force ()
-  ;; Every display of a pane comes here.  A forced redraw would break
-  ;; through a frame the program holds with mode 2026; the size still
-  ;; goes through, as a font change can keep the grid but not the cells.
+(ert-deftest ghostel-tmux-test-resize-pane-passes-an-unchanged-size-on ()
+  ;; Every display of a pane comes here.  The size it has still goes to
+  ;; the terminal, as a font change can keep the grid but not the cells,
+  ;; and to tmux, whose client size may be that of another pane.
   (let ((ctl (generate-new-buffer "*ghostel-tmux:same-ctl%0*"))
         (events nil))
     (unwind-protect
         (with-temp-buffer
           (with-current-buffer ctl
             (setq-local ghostel-tmux--controller-process 'fake-proc))
-          (setq-local ghostel-tmux--controller-buffer ctl
-                      ghostel--term 'fake-term
-                      ghostel--term-rows 40
-                      ghostel--term-cols 120)
-          (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
-                     (lambda (&rest _) (push 'resize events)))
-                    ((symbol-function 'ghostel--redraw-now)
-                     (lambda (&rest _) (push 'redraw events)))
-                    ((symbol-function 'ghostel--invalidate)
-                     (lambda () (push 'invalidate events)))
+          (setq-local ghostel-tmux--controller-buffer ctl)
+          (cl-letf (((symbol-function 'ghostel-terminal-size)
+                     (lambda () '(120 . 40)))
+                    ((symbol-function 'ghostel-set-size)
+                     (lambda (rows cols) (push (list 'size rows cols) events)))
                     ((symbol-function 'process-live-p) (lambda (_) t))
                     ((symbol-function 'process-send-string)
                      (lambda (&rest _) (push 'report events))))
             (ghostel-tmux--resize-pane 40 120))
-          (should (equal (nreverse events) '(resize invalidate report))))
+          (should (equal (nreverse events) '((size 40 120) report))))
       (kill-buffer ctl))))
 
-(ert-deftest ghostel-tmux-test-hidden-resize-repairs-on-display ()
-  ;; The commit renders without a window of the pane.
+(ert-deftest ghostel-tmux-test-set-pane-size-skips-the-size-it-has ()
+  ;; A layout names every pane of its window, most of them unchanged.
   (with-temp-buffer
-    (let ((committed nil))
-      (cl-letf (((symbol-function 'ghostel--commit-frame)
-                 (lambda (buf) (setq committed buf))))
-        (ghostel-tmux--commit-hidden-resize))
-      (should (eq committed (current-buffer)))
-      (should ghostel--repair-pending)
-      (should ghostel--pending-redraw))))
+    (let ((sizes nil))
+      (cl-letf (((symbol-function 'ghostel-terminal-size)
+                 (lambda () '(120 . 40)))
+                ((symbol-function 'ghostel-set-size)
+                 (lambda (rows cols) (push (list rows cols) sizes))))
+        (ghostel-tmux--set-pane-size (current-buffer) 120 40)
+        (should-not sizes)
+        (ghostel-tmux--set-pane-size (current-buffer) 100 30))
+      (should (equal sizes '((30 100)))))))
 
-(ert-deftest ghostel-tmux-test-hidden-resize-leaves-copy-and-line-mode ()
-  ;; A direct render paints over a frozen view and loses line-mode input.
-  (dolist (mode '(copy line))
-    (with-temp-buffer
-      (setq-local ghostel--input-mode mode)
-      (cl-letf (((symbol-function 'ghostel--commit-frame)
-                 (lambda (_) (error "Rendered directly"))))
-        (ghostel-tmux--commit-hidden-resize))
-      (should-not ghostel--repair-pending))))
+(ert-deftest ghostel-tmux-test-backfill-fills-the-terminal-rows ()
+  ;; The backfill is laid out for the rows the terminal was given.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*ghostel-tmux:rows%0*"))
+          (rows nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-terminal-size)
+                     (lambda () '(100 . 30)))
+                    ((symbol-function 'ghostel-tmux--backfill-data)
+                     (lambda (_state _primary _rows _screen term-rows)
+                       (setq rows term-rows)
+                       ""))
+                    ((symbol-function 'ghostel-write-output) #'ignore))
+            (with-current-buffer ctl
+              (puthash 0 pane ghostel-tmux--panes))
+            (ghostel-tmux--receive-pane-backfill ctl 0 nil nil "rows" nil)
+            (should (eql rows 30)))
+        (when (buffer-live-p pane) (kill-buffer pane))))))
 
 (ert-deftest ghostel-tmux-test-session-renamed-other-session ()
   ;; tmux reports this for every session on the server.
@@ -4345,10 +4327,9 @@ display-message -p %s\n"
                                        ghostel-tmux--initialized t))
                          (puthash pid buf ghostel-tmux--panes)
                          buf)))
-                    ((symbol-function 'ghostel--set-size-with-cell-dims)
-                     (lambda (_term rows cols)
+                    ((symbol-function 'ghostel-set-size)
+                     (lambda (rows cols)
                        (push (list ghostel-tmux--pane-id cols rows) sizes)))
-                    ((symbol-function 'ghostel--commit-frame) #'ignore)
                     ((symbol-function 'get-buffer-window-list)
                      (lambda (&rest _) nil)))
             (dolist (pane panes)
@@ -4524,10 +4505,10 @@ display-message -p %s\n"
     (unwind-protect
         (cl-letf (((symbol-function 'process-file)
                    (lambda (&rest _) (insert "one\ntwo\n\n") 0))
-                  ((symbol-function 'ghostel--init-buffer) #'ignore)
-                  ((symbol-function 'ghostel--write-vt)
-                   (lambda (_term data) (setq fed data)))
-                  ((symbol-function 'ghostel--invalidate) #'ignore)
+                  ((symbol-function 'ghostel-make-terminal)
+                   (lambda (name &rest _) (generate-new-buffer name)))
+                  ((symbol-function 'ghostel-write-output)
+                   (lambda (data &rest _) (setq fed data)))
                   ((symbol-function 'pop-to-buffer)
                    (lambda (b &rest _) (setq buf b))))
           (ghostel-tmux-capture "s:0.0")
@@ -4972,7 +4953,7 @@ collects the lines sent, newest first.  The panes are plain buffers."
     (ghostel-tmux--tile-build 0 (selected-window))
     (let ((ghostel-tmux-split-windows nil)
           (zoomed nil))
-      (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore)
+      (cl-letf (((symbol-function 'ghostel-fit-window) #'ignore)
                 ((symbol-function 'ghostel-tmux--ensure-pane-zoomed)
                  (lambda (_wid pid) (push pid zoomed))))
         (ghostel-tmux--split-windows-changed))
@@ -5016,7 +4997,7 @@ collects the lines sent, newest first.  The panes are plain buffers."
             (puthash 1 (list :name "x" :panes '(9)
                              :tree (ghostel-tmux--parse-layout-tree "cccc,79x23,0,0,9"))
                      ghostel-tmux--windows)
-            (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore))
+            (cl-letf (((symbol-function 'ghostel-fit-window) #'ignore))
               (ghostel-tmux--display-pane-in-window other (selected-window)))
             (should-not (ghostel-tmux--tile-windows ctl 0))
             (should (= (length (window-list nil 'no-mini)) 1))
@@ -5045,9 +5026,7 @@ tmux resizing a zoomed window reports it unzoomed on the way."
      ctl "%layout-change @0 aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6} bbbb,79x23,0,0,6 *Z\r\n")
     (ghostel-tmux--pump-deferred ctl)
     (should (= (length sent) 1))
-    (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
-              ((symbol-function 'ghostel--redraw-now) #'ignore)
-              ((symbol-function 'ghostel-tmux--commit-hidden-resize) #'ignore))
+    (cl-letf (((symbol-function 'ghostel-set-size) #'ignore))
       (ghostel-tmux-test--reply ctl "bbbb,79x23,0,0,6\r\n"))
     (should (equal (ghostel-tmux-test--tile-pids ctl) '(6)))))
 
@@ -5106,7 +5085,7 @@ tmux resizing a zoomed window reports it unzoomed on the way."
             (puthash 1 (list :name "x" :panes '(9) :active-pane 9
                              :tree (ghostel-tmux--parse-layout-tree "cccc,79x23,0,0,9"))
                      ghostel-tmux--windows)
-            (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore))
+            (cl-letf (((symbol-function 'ghostel-fit-window) #'ignore))
               (ghostel-tmux-test--feed ctl "%session-window-changed $1 @1\r\n"))
             (should-not (ghostel-tmux--tile-windows ctl 0))
             (should (equal (window-list nil 'no-mini) (list kept)))
@@ -5179,7 +5158,7 @@ tmux resizing a zoomed window reports it unzoomed on the way."
               (set-window-buffer right other)
               (select-window right)
               (set-buffer ctl)
-              (cl-letf (((symbol-function 'ghostel--adjust-size) #'ignore))
+              (cl-letf (((symbol-function 'ghostel-fit-window) #'ignore))
                 (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n"))
               (should (eq (window-buffer right) other))
               (should (eq (window-buffer left) (gethash 6 ghostel-tmux--panes))))
@@ -5487,9 +5466,7 @@ That layout is from before tmux got the tile's size."
                    (lambda (&rest _) (error "Scheduled"))))
           (ghostel-tmux--tile-resize))
         (should-not sent)
-        (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims) #'ignore)
-                  ((symbol-function 'ghostel--redraw-now) #'ignore)
-                  ((symbol-function 'ghostel-tmux--commit-hidden-resize) #'ignore))
+        (cl-letf (((symbol-function 'ghostel-set-size) #'ignore))
           (ghostel-tmux--show-layout
            0 (ghostel-tmux--parse-layout-tree
               (format "aaaa,%dx%d,0,0{39x23,0,0,5,39x23,40,0,6}"
@@ -5644,11 +5621,10 @@ That layout is from before tmux got the tile's size."
       (setq-local ghostel--term-rows 23)
       (setq-local ghostel--term-cols 39)
       (let (sizes)
-        (cl-letf (((symbol-function 'ghostel--set-size-with-cell-dims)
-                   (lambda (_term rows cols) (push (cons cols rows) sizes))))
+        (cl-letf (((symbol-function 'ghostel-set-size)
+                   (lambda (rows cols) (push (cons cols rows) sizes))))
           (ghostel-tmux--resize-pane 10 10))
-        (should (equal sizes '((39 . 23))))
-        (should (= ghostel--term-cols 39))))
+        (should (equal sizes '((39 . 23))))))
     (should-not sent)))
 
 (provide 'ghostel-tmux-test)

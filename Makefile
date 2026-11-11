@@ -9,7 +9,10 @@ LINT_DEPS_STAMP := $(LINT_ELPA_DIR)/.deps-installed
 
 LOAD_PATH = -L . -L "$(GHOSTEL_DIR)/lisp"
 
-.PHONY: all byte-compile test test-native test-shell test-elate lint package-lint checkdoc clean
+# ghostel's internal symbols that ghostel-tmux.el may use.
+GHOSTEL_INTERNALS =
+
+.PHONY: all byte-compile test test-native test-shell test-elate lint package-lint checkdoc ghostel-internals clean
 
 all: byte-compile test test-shell lint
 
@@ -42,7 +45,7 @@ test-elate:
 	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/subprocess.json
 	GHOSTEL_DIR="$(GHOSTEL_DIR)" $(ELATE) matrix --emacs "$$(command -v $(EMACS))" test/elate/splits.json
 
-lint: byte-compile package-lint checkdoc
+lint: byte-compile package-lint checkdoc ghostel-internals
 
 $(LINT_DEPS_STAMP): | $(GHOSTEL_DIR)
 	$(EMACS) --batch $(EMACSFLAGS) -Q \
@@ -72,6 +75,17 @@ checkdoc: ghostel-tmux.el
 		    (setq ok nil) \
 		    (with-current-buffer \"*Warnings*\" (message \"%s\" (buffer-string)))) \
 		  (unless ok (kill-emacs 1)))"
+
+ghostel-internals: ghostel-tmux.el
+	@found=$$(grep -HnoE 'ghostel--[A-Za-z0-9*?/<>=!+_:%&~^-]+' $^); \
+	[ $$? -le 1 ] || exit 2; \
+	other=$$(printf '%s\n' "$$found" | awk -F: -v allowed='$(GHOSTEL_INTERNALS)' \
+	    'BEGIN { split(allowed, a, " "); for (i in a) ok[a[i]] } \
+	     $$NF != "" && !($$NF in ok)'); \
+	if [ -n "$$other" ]; then \
+	  printf '%s\n' "$$other" "ghostel internals in use; see GHOSTEL_INTERNALS"; \
+	  exit 1; \
+	fi
 
 clean:
 	rm -f ghostel-tmux.elc

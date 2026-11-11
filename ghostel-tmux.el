@@ -31,10 +31,11 @@
 ;;
 ;; The protocol layer is implemented purely in Elisp.  For the takeover,
 ;; ghostel reports the control-mode DCS in a shell's output through
-;; `ghostel-control-mode-function'.  Pane data is fed into the existing
-;; native VT engine via `ghostel--write-vt', and outbound keystrokes are
-;; routed through `ghostel-pty-out-function' to the control-mode channel
-;; as `send-keys -H' commands.
+;; `ghostel-control-mode-function'.  Each pane is a terminal of
+;; `ghostel-make-terminal' that gets the pane's output through
+;; `ghostel-write-output', and outbound keystrokes are routed through
+;; `ghostel-pty-out-function' to the control-mode channel as
+;; `send-keys -H' commands.
 
 ;;; Code:
 
@@ -42,9 +43,6 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'tab-line)
-
-(declare-function ghostel--write-vt "ghostel-module" (term data))
-(declare-function ghostel--write-pty "ghostel-module" (term data))
 
 
 ;; Customization
@@ -222,13 +220,6 @@ completion.  Restored on exit.")
   "The `ghostel-identity' of an auto-takeover host, saved on entry.
 The host has none in control mode, so that `ghostel' does not pick it.")
 
-(defvar ghostel-tmux--in-write-vt nil
-  "Non-nil while feeding tmux `%output' bytes into a pane's VT engine.
-The engine's replies to queries in the output (OSC colors, DA, cursor
-position) are dropped while this is set: through `send-keys' they would
-reach the pane after the program asking has usually exited, and land in
-the next prompt as if typed.")
-
 (defvar-local ghostel-tmux--auto-host-window nil
   "When non-nil, the window to show tmux's active pane in once it is known.
 Set when a takeover starts, for the pane to replace the host's view, on
@@ -278,7 +269,7 @@ pair: that would render the scrollback twice.")
 
 (defun ghostel-tmux--decode-output (data)
   "Return DATA with tmux wire escapes decoded to raw bytes.
-The result is a unibyte string suitable for `ghostel--write-vt'.
+The result is a unibyte string suitable for `ghostel-write-output'.
 Escapes >= \\200 must decode via `unibyte-string': `string' would
 produce a multibyte Latin-1 character whose binary encoding is its
 two-byte internal form, not the single raw byte."
@@ -534,9 +525,7 @@ that session."
       ;; A snapshot has nowhere to send focus or mouse reports, and with
       ;; mouse tracking on, the wheel and clicks would go to them instead
       ;; of scrolling and selecting.
-      (when ghostel--term
-        (ghostel--write-vt ghostel--term
-                           "\e[?1000l\e[?1002l\e[?1003l\e[?1004l"))
+      (ghostel-write-output "\e[?1000l\e[?1002l\e[?1003l\e[?1004l")
       (ghostel-tmux--drop-tab-line))))
 
 (defun ghostel-tmux--keep-panes-p (alive)
@@ -594,8 +583,7 @@ auto-takeover host; pane buffers are sealed read-only or killed, see
         (setq ghostel-tmux--dcs-active nil)
         (ghostel-tmux--exit-control-mode controller)
         ;; An empty line makes tmux leave control mode and close the DCS.
-        (when ghostel--term
-          (ghostel--write-pty ghostel--term "\n")))
+        (ghostel-send-string "\n" t))
        (t
         (when (and ghostel-tmux--controller-process
                    (process-live-p ghostel-tmux--controller-process))
@@ -671,9 +659,9 @@ auto-takeover host; pane buffers are sealed read-only or killed, see
 ;; `ghostel-tmux-attach' / `ghostel-tmux-new') owns a plain `tmux -CC'
 ;; subprocess whose stdin accepts commands directly.  An *auto-takeover
 ;; host* rides an existing ghostel shell's PTY: commands must go through
-;; `ghostel--write-pty', because with the native PTY backend the
-;; buffer's `ghostel--process' is only the event pipe — writing to it
-;; goes nowhere.
+;; the terminal, as `ghostel-send-string' with RAW does, because with the
+;; native PTY backend the buffer's process is only the event pipe —
+;; writing to it goes nowhere.
 ;;
 ;; `ghostel-tmux--controller-send' is the low-level transport; every
 ;; command must reach it through `ghostel-tmux--queue-command'.  tmux
@@ -693,7 +681,7 @@ auto-takeover host; pane buffers are sealed read-only or killed, see
   "Return non-nil when the current controller buffer can reach tmux."
   (if ghostel-tmux--controller-process
       (process-live-p ghostel-tmux--controller-process)
-    (and ghostel-tmux--dcs-active ghostel--term t)))
+    ghostel-tmux--dcs-active))
 
 (defun ghostel-tmux--controller-send (data)
   "Send DATA (raw command bytes) to tmux from the current controller buffer."
@@ -701,8 +689,8 @@ auto-takeover host; pane buffers are sealed read-only or killed, see
    (ghostel-tmux--controller-process
     (when (process-live-p ghostel-tmux--controller-process)
       (process-send-string ghostel-tmux--controller-process data)))
-   ((and ghostel-tmux--dcs-active ghostel--term)
-    (ghostel--write-pty ghostel--term data))))
+   (ghostel-tmux--dcs-active
+    (ghostel-send-string data t))))
 
 
 ;; Command queue
@@ -770,27 +758,19 @@ A nil WINDOW-NAME (we haven't been told yet) is rendered as
                               (or session-name "?")
                               window-name
                               pane-id))
-               (buf (generate-new-buffer name)))
-          ;; ghostel refuses a local directory that is gone, such as the
-          ;; one an attach started in.
-          (unless (or (file-remote-p default-directory)
-                      (file-directory-p default-directory))
-            (with-current-buffer buf
-              (setq default-directory (expand-file-name "~/"))))
-          (condition-case err
-              (ghostel--init-buffer buf ghostel-tmux-default-rows
-                                    ghostel-tmux-default-cols)
-            ((error quit)
-             (kill-buffer buf)
-             (signal (car err) (cdr err))))
+               (buf (ghostel-make-terminal name ghostel-tmux-default-rows
+                                           ghostel-tmux-default-cols)))
           (puthash pane-id buf ghostel-tmux--panes)
           (with-current-buffer buf
+            ;; A local directory that is gone, such as the one an attach
+            ;; started in, would fail every command run from the pane.
+            (unless (or (file-remote-p default-directory)
+                        (file-directory-p default-directory))
+              (setq default-directory (expand-file-name "~/")))
             (ghostel-tmux-pane-mode 1)
             (setq ghostel-tmux--controller-buffer controller
                   ghostel-tmux--pane-id pane-id
                   ghostel-tmux--window-id window-id
-                  ghostel--term-rows ghostel-tmux-default-rows
-                  ghostel--term-cols ghostel-tmux-default-cols
                   ghostel-pty-out-function
                   (apply-partially #'ghostel-tmux--send-bytes-from-pane
                                    controller pane-id)
@@ -891,13 +871,10 @@ the capture snapshot."
       (let ((decoded (ghostel-tmux--decode-output data)))
         (with-current-buffer buf
           (when ghostel-tmux--initialized
-            ;; Native callbacks dispatched while parsing (e.g. OSC 52;e)
-            ;; may select another buffer; keep the follow-up
-            ;; buffer-local work anchored to this pane buffer.
-            (let ((ghostel-tmux--in-write-vt t))
-              (save-current-buffer
-                (ghostel--write-vt ghostel--term decoded)))
-            (ghostel--invalidate)))))))
+            ;; tmux answers the program's queries; a reply sent with
+            ;; `send-keys' would arrive after the program asking has
+            ;; usually exited, in the next prompt as if typed.
+            (ghostel-write-output decoded t)))))))
 
 (defun ghostel-tmux--pane-window ()
   "Return a visible window showing a pane of this controller, or nil.
@@ -1488,17 +1465,13 @@ for, each nil for a failed command."
       (with-current-buffer buf
         ;; A pane killed while its backfill was queued gets a second one.
         (when (and rows (not ghostel-tmux--initialized))
-          (let ((data (ghostel-tmux--backfill-data
-                       (ghostel-tmux--parse-pane-state state) primary rows
-                       screen ghostel--term-rows))
-                (ghostel-tmux--in-write-vt t))
-            ;; save-current-buffer: native callbacks may select another
-            ;; buffer mid-parse; the state updates below must land here.
-            (save-current-buffer
-              (ghostel--write-vt ghostel--term data))))
+          (ghostel-write-output
+           (ghostel-tmux--backfill-data
+            (ghostel-tmux--parse-pane-state state) primary rows
+            screen (cdr (ghostel-terminal-size)))
+           t))
         (setq ghostel-tmux--initialized t
-              ghostel-tmux--bootstrap-pending nil)
-        (ghostel--invalidate)))))
+              ghostel-tmux--bootstrap-pending nil)))))
 
 (defun ghostel-tmux--wipe-panes ()
   "Drop all pane buffers and reset window state."
@@ -1534,11 +1507,9 @@ under the typical 4 KB limit of the PTY's line discipline.")
 (defun ghostel-tmux--send-bytes-from-pane (controller pane-id data)
   "Send DATA bytes to tmux PANE-ID via CONTROLLER as `send-keys -H'.
 Long DATA is split into several commands, as a line longer than the
-controller PTY's input buffer is truncated.  Bytes generated while
-feeding `%output' are dropped, see `ghostel-tmux--in-write-vt'."
+controller PTY's input buffer is truncated."
   (when (and data (> (length data) 0)
-             (buffer-live-p controller)
-             (not ghostel-tmux--in-write-vt))
+             (buffer-live-p controller))
     (let ((unibytes (if (multibyte-string-p data)
                         (encode-coding-string data 'utf-8)
                       data)))
@@ -1863,7 +1834,7 @@ byte (`C-<letter>')."
                     (let ((e (aref seq 0)))
                       (and (integerp e) (<= 0 e 31) e)))))
     (if byte
-        (ghostel--send-string (string byte))
+        (ghostel-send-string (string byte))
       (message "Ghostel-tmux: %S is not a control byte; cannot send raw"
                ghostel-tmux-prefix-key))))
 
@@ -1956,32 +1927,12 @@ The pane lives on in tmux, so a buffer the user killed comes back."
 
 ;; Sizing
 
-(defun ghostel-tmux--commit-hidden-resize ()
-  "Commit a resize of this pane, which no window shows.
-The terminal commits a resize on its next redraw and clears the prompt
-row then; that redraw would clear the prompt the shell repaints after
-tmux has resized the pane.  This render has no window of the pane and
-loses glyph sizing, so showing the pane repaints it in full.  A pane in
-copy or line mode cannot be rendered directly and keeps the resize
-pending."
-  (unless (memq ghostel--input-mode '(copy line))
-    (ghostel--commit-frame (current-buffer))
-    (setq ghostel--repair-pending t
-          ghostel--pending-redraw t)))
-
 (defun ghostel-tmux--set-pane-size (buf cols rows)
   "Give the terminal of pane BUF tmux's size of COLS by ROWS.
-A shown pane redraws at once; see `ghostel-tmux--resize-pane'."
+Do nothing when it has that size."
   (with-current-buffer buf
-    (when (and ghostel--term
-               (or (not (eql ghostel--term-cols cols))
-                   (not (eql ghostel--term-rows rows))))
-      (ghostel--set-size-with-cell-dims ghostel--term rows cols)
-      (setq ghostel--term-cols cols
-            ghostel--term-rows rows)
-      (if (get-buffer-window-list buf nil 'visible)
-          (ghostel--redraw-now buf t)
-        (ghostel-tmux--commit-hidden-resize)))))
+    (unless (equal (ghostel-terminal-size) (cons cols rows))
+      (ghostel-set-size rows cols))))
 
 (defun ghostel-tmux--resize-pane (rows cols)
   "Resize this pane's terminal to ROWS by COLS and report the size to tmux.
@@ -1995,21 +1946,12 @@ instead, see `ghostel-tmux--tile-check'."
              (buffer-live-p controller)
              (ghostel-tmux--tile-windows controller ghostel-tmux--window-id))
         (progn
-          (when ghostel--term
-            (ghostel--set-size-with-cell-dims ghostel--term ghostel--term-rows
-                                              ghostel--term-cols))
+          (when-let* ((size (ghostel-terminal-size)))
+            (ghostel-set-size (cdr size) (car size)))
           (ghostel-tmux--schedule-tile-check))
-      (let ((same-size (and (eql rows ghostel--term-rows)
-                            (eql cols ghostel--term-cols))))
-        (ghostel--set-size-with-cell-dims ghostel--term rows cols)
-        (setq ghostel--term-rows rows
-              ghostel--term-cols cols)
-        ;; The terminal commits a resize on its next redraw and clears the
-        ;; prompt row then.  Commit now: after tmux has resized the pane,
-        ;; that would clear the prompt the shell has just repainted.
-        (if same-size
-            (ghostel--invalidate)
-          (ghostel--redraw-now (current-buffer) t)))
+      ;; Committed now, before tmux hears of the size: committed later, the
+      ;; resize would clear the prompt row the shell has repainted by then.
+      (ghostel-set-size rows cols)
       (when (buffer-live-p controller)
         (with-current-buffer controller
           (when (ghostel-tmux--controller-live-p)
@@ -2627,11 +2569,10 @@ The selected window comes first."
 
 (defun ghostel-tmux--tile-sync-size (wid)
   "Report what the tile of tmux window WID can show with `refresh-client -C'.
-Runs in the controller; only for the session's current window, whose
-size the client sets, only for a tile as its layout is, and only when
-the size changed.  As in
-`ghostel--adjust-size', fewer rows while the minibuffer is active do
-not count.  Return the size sent, or nil."
+Runs in the controller; only for the session's current window, whose size the
+client sets, only for a tile as its layout is, and only when the size changed.
+As when ghostel refits a terminal to its windows, fewer rows while the
+minibuffer is active do not count.  Return the size sent, or nil."
   (when (and (eql wid ghostel-tmux--current-window-id)
              (ghostel-tmux--controller-live-p))
     (when-let* ((windows (ghostel-tmux--tile-windows (current-buffer) wid))
@@ -3124,8 +3065,9 @@ a reply while tmux stays attached: an empty line makes it leave."
     (let ((closing ghostel-tmux--closing))
       (setq ghostel-tmux--dcs-active nil)
       (ghostel-tmux--exit-control-mode (current-buffer))
-      (when (and (not closing) ghostel--term (process-live-p ghostel--process))
-        (ghostel--write-pty ghostel--term "\n")))))
+      (when (and (not closing)
+                 (process-live-p (get-buffer-process (current-buffer))))
+        (ghostel-send-string "\n" t)))))
 
 (defun ghostel-tmux--reset-session-state ()
   "Forget the parser, the command queue and the session's windows."
@@ -3159,7 +3101,7 @@ are created as the parser sees notifications.  The host is hidden, see
     (add-hook 'window-buffer-change-functions #'ghostel-tmux--hide-host nil t)
     ;; `ghostel-tmux--controller-process' stays nil: the control stream
     ;; rides the host PTY, which `ghostel-tmux--controller-send' reaches
-    ;; through `ghostel--write-pty'.
+    ;; through `ghostel-send-string'.
     (ghostel-tmux--reset-session-state)
     (setq ghostel-tmux--controller-process nil
           ghostel-tmux--session-name ghostel-tmux--auto-original-name
@@ -3231,9 +3173,9 @@ and the host reverts to a plain buffer."
   "Give this host its `ghostel-identity' back, as a new instance if taken."
   (let ((identity ghostel-tmux--host-identity))
     (when (and (assq 'instance identity)
-               (ghostel--find-buffer-by-identity identity))
+               (ghostel-find-buffer-by-identity identity))
       (let ((context (assq-delete-all 'instance (copy-alist identity))))
-        (setq identity (cons (cons 'instance (ghostel--next-instance context))
+        (setq identity (cons (cons 'instance (ghostel-next-instance context))
                              context))))
     (setq ghostel-identity identity
           ghostel-tmux--host-identity nil)))
@@ -3296,7 +3238,7 @@ A non-zero exit (no server running) counts as no sessions."
 
 (defun ghostel-tmux--check-spawn ()
   "Signal `user-error' when no controller can start in `default-directory'."
-  (ghostel--load-module t)
+  (ghostel-ensure-module)
   ;; A remote shell that cannot `cd' there stays alive at its prompt.
   (unless (file-directory-p default-directory)
     (user-error "Ghostel-tmux: No directory %s" default-directory)))
@@ -3355,7 +3297,7 @@ split leaves half a pane in a full-height Emacs window."
           (ghostel-tmux--recover-members))
         (cond
          ((not ghostel-tmux-split-windows)
-          (ghostel--adjust-size window t)
+          (ghostel-fit-window window)
           (when (and pane-id window-id (buffer-live-p controller))
             (with-current-buffer controller
               (when (ghostel-tmux--controller-live-p)
@@ -3378,7 +3320,7 @@ split leaves half a pane in a full-height Emacs window."
               (run-at-time 0 nil #'ghostel-tmux--show-tile pane-buf window)
             (ghostel-tmux--show-tile pane-buf window)))
          (t
-          (ghostel--adjust-size window t)
+          (ghostel-fit-window window)
           (when (and pane-id window-id)
             (with-current-buffer controller
               (when (ghostel-tmux--controller-live-p)
@@ -3637,7 +3579,7 @@ The pane buffers go, see `ghostel-tmux-keep-detached-panes'."
           ;; auto-takeover case — isn't lost to the upcoming
           ;; `delete-process'.
           (let ((proc (or ghostel-tmux--controller-process
-                          ghostel--process)))
+                          (get-buffer-process (current-buffer)))))
             (when (process-live-p proc)
               (accept-process-output proc 0.2))))
         (cond
@@ -3792,7 +3734,7 @@ connected to a live tmux session."
   (interactive
    (list (read-string "tmux target (e.g. mysession:0.0 or %3): "
                       (or (ghostel-tmux--prefix-target) ""))))
-  (ghostel--load-module t)
+  (ghostel-ensure-module)
   (let* ((status nil)
          (output
           (with-output-to-string
@@ -3806,24 +3748,19 @@ connected to a live tmux session."
       (user-error "Ghostel-tmux: capture-pane failed for %s" target))
     (when (string-empty-p output)
       (user-error "Ghostel-tmux: Empty capture for %s" target))
-    (let ((buf (generate-new-buffer
-                (format "*ghostel-tmux-capture:%s*" target))))
-      (ghostel--init-buffer buf ghostel-tmux-default-rows
-                            ghostel-tmux-default-cols)
+    (let ((buf (ghostel-make-terminal
+                (format "*ghostel-tmux-capture:%s*" target)
+                ghostel-tmux-default-rows ghostel-tmux-default-cols)))
       (with-current-buffer buf
         (ghostel-tmux-pane-mode 1)
         (ghostel-tmux--drop-tab-line)
-        (setq ghostel--term-rows ghostel-tmux-default-rows
-              ghostel--term-cols ghostel-tmux-default-cols
-              ;; Swallow query replies (OSC/DA) — there is no live pane
-              ;; to answer to.
-              ghostel-pty-out-function #'ignore)
+        ;; Swallow typed input and query replies (OSC/DA): there is no
+        ;; live pane to send them to.
+        (setq ghostel-pty-out-function #'ignore)
         ;; Rows are LF-separated and the VT engine does not synthesize CR.
-        (ghostel--write-vt ghostel--term
-                           (string-replace "\n" "\r\n"
-                                           (string-trim-right output "\n+")))
-        (setq ghostel-tmux--initialized t)
-        (ghostel--invalidate))
+        (ghostel-write-output (string-replace "\n" "\r\n"
+                                              (string-trim-right output "\n+")))
+        (setq ghostel-tmux--initialized t))
       (pop-to-buffer buf))))
 
 (provide 'ghostel-tmux)
