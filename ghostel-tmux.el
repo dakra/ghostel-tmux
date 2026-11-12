@@ -263,25 +263,40 @@ pair: that would render the scrollback twice.")
 ;; CR as "\015", LF as "\012".  We must decode these back to raw bytes
 ;; before feeding them to the VT engine.
 
-(defconst ghostel-tmux--octal-rx
-  "\\\\\\(\\\\\\|[0-7][0-7][0-7]\\)"
-  "Match a tmux wire escape: 3-digit octal `\\NNN' or `\\\\' (capture-pane -C).")
+(defvar ghostel-tmux--decode-buffer nil
+  "Unibyte work buffer of `ghostel-tmux--decode-output'.")
 
 (defun ghostel-tmux--decode-output (data)
   "Return DATA with tmux wire escapes decoded to raw bytes.
-The result is a unibyte string suitable for `ghostel-write-output'.
-Escapes >= \\200 must decode via `unibyte-string': `string' would
-produce a multibyte Latin-1 character whose binary encoding is its
-two-byte internal form, not the single raw byte."
-  (let ((decoded
-         (replace-regexp-in-string
-          ghostel-tmux--octal-rx
-          (lambda (m)
-            (let ((esc (match-string 1 m)))
-              (if (equal esc "\\") "\\"
-                (unibyte-string (string-to-number esc 8)))))
-          data t t)))
-    (encode-coding-string decoded 'binary)))
+The escapes are 3-digit octal `\\NNN' and `\\\\' (capture-pane -C).  The
+result is a unibyte string suitable for `ghostel-write-output'."
+  (let ((data (if (multibyte-string-p data)
+                  (encode-coding-string data 'binary)
+                data)))
+    (if (not (string-search "\\" data))
+        data
+      (with-current-buffer
+          (if (buffer-live-p ghostel-tmux--decode-buffer)
+              ghostel-tmux--decode-buffer
+            (setq ghostel-tmux--decode-buffer
+                  (with-current-buffer
+                      (get-buffer-create " *ghostel-tmux-decode*" t)
+                    (set-buffer-multibyte nil)
+                    (current-buffer))))
+        (let ((inhibit-modification-hooks t))
+          (erase-buffer)
+          (insert data)
+          (goto-char (point-min))
+          (while (search-forward "\\" nil t)
+            (let ((a (char-after))
+                  (b (char-after (1+ (point))))
+                  (c (char-after (+ (point) 2))))
+              (cond
+               ((eq a ?\\) (delete-char 1))
+               ((and a b c (<= ?0 a ?7) (<= ?0 b ?7) (<= ?0 c ?7))
+                (delete-region (1- (point)) (+ (point) 3))
+                (insert (+ (* 64 (- a ?0)) (* 8 (- b ?0)) (- c ?0))))))))
+        (buffer-string)))))
 
 
 ;; Layout string parser

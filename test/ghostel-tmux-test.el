@@ -165,6 +165,18 @@ fills its output queue between the two repeats the CR."
     (should-not (multibyte-string-p decoded))
     (should (equal (append decoded nil) '(#xC3 #x97 #xC8)))))
 
+(ert-deftest ghostel-tmux-test-decode-escaped-backslash ()
+  ;; capture-pane -C writes a backslash as `\\'; what follows it is text.
+  (should (equal (ghostel-tmux--decode-output "a\\\\b\\\\033")
+                 "a\\b\\033")))
+
+(ert-deftest ghostel-tmux-test-decode-backslash-is-not-decoded-again ()
+  (should (equal (ghostel-tmux--decode-output "\\134033") "\\033")))
+
+(ert-deftest ghostel-tmux-test-decode-incomplete-escape ()
+  (should (equal (ghostel-tmux--decode-output "a\\01") "a\\01"))
+  (should (equal (ghostel-tmux--decode-output "a\\") "a\\")))
+
 ;; ---------------------------------------------------------------------------
 ;; Layout parser
 ;; ---------------------------------------------------------------------------
