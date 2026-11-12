@@ -1465,17 +1465,20 @@ fills its output queue between the two repeats the CR."
 ;; ---------------------------------------------------------------------------
 
 (ert-deftest ghostel-tmux-test-spawn-controller-attach-cmd ()
-  (let ((seen-cmd nil))
+  (let ((seen-cmd nil)
+        (seen-type nil))
     (cl-letf (((symbol-function 'make-process)
                (lambda (&rest plist)
-                 (setq seen-cmd (plist-get plist :command))
+                 (setq seen-cmd (plist-get plist :command)
+                       seen-type (plist-get plist :connection-type))
                  'fake-proc))
               ((symbol-function 'set-process-coding-system) #'ignore))
       (let ((buf (ghostel-tmux--spawn-controller
                   "demo" '("attach-session" "-t" "demo"))))
         (kill-buffer buf)))
     (should (equal seen-cmd
-                   '("tmux" "-u" "-CC" "attach-session" "-t" "demo")))))
+                   '("tmux" "-u" "-C" "attach-session" "-t" "demo")))
+    (should (eq seen-type 'pipe))))
 
 (ert-deftest ghostel-tmux-test-spawn-controller-new-cmd ()
   (let ((seen-cmd nil))
@@ -1488,7 +1491,7 @@ fills its output queue between the two repeats the CR."
                   "fresh" '("new-session" "-As" "fresh"))))
         (kill-buffer buf)))
     (should (equal seen-cmd
-                   '("tmux" "-u" "-CC" "new-session" "-As" "fresh")))))
+                   '("tmux" "-u" "-C" "new-session" "-As" "fresh")))))
 
 ;; ---------------------------------------------------------------------------
 ;; Detach: dedicated vs auto-takeover

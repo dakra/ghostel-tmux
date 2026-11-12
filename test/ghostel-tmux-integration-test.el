@@ -20,29 +20,33 @@
 ;; ---------------------------------------------------------------------------
 ;;
 ;; The wire format below was observed against tmux 3.4 in a docker
-;; container.  Lines end with CRLF.  %output payloads use octal escape
-;; encoding for control bytes.  The fake replies to each stdin command
-;; line with its own `%begin'/`%end' block, mirroring real control-mode
-;; pairing (one reply block per command line, in wire order).
+;; container.  `tmux -C' on a pipe sends no DCS and ends lines with LF;
+;; the fake fails unless it is started with `-C' on a pipe.  %output
+;; payloads use octal escape encoding for control bytes.  The fake replies
+;; to each stdin command line with its own `%begin'/`%end' block, mirroring
+;; real control-mode pairing (one reply block per command line, in wire
+;; order).
 
 (defconst ghostel-tmux-integration-test--script
   "#!/bin/sh
-printf '\\033P1000p%%begin 1 0 0\\r\\n'
-printf '%%end 1 0 0\\r\\n'
-printf '%%session-changed $0 0\\r\\n'
+[ \"$2\" = -C ] || { echo \"fake tmux: started without -C\"; exit 1; }
+[ -t 0 ] && { echo \"fake tmux: stdin is a terminal\"; exit 1; }
+printf '%%begin 1 0 0\\n'
+printf '%%end 1 0 0\\n'
+printf '%%session-changed $0 0\\n'
 i=1
 while IFS= read -r line; do
   i=$((i+1))
   case \"$line\" in
     *alternate_on*)
-      printf '%%begin %d %d 1\\r\\n0,0,0,16,1,1,1,0,0,0,1,0,0,0,0,0,0,1,2\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\n0,0,0,16,1,1,1,0,0,0,1,0,0,0,0,0,0,1,2\\n%%end %d %d 1\\n' $i $i $i $i ;;
     list-windows*)
-      printf '%%begin %d %d 1\\r\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\tbd5b,80x24,0,0,0\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\tbd5b,80x24,0,0,0\\n%%end %d %d 1\\n' $i $i $i $i ;;
     capture-pane*)
-      printf '%%begin %d %d 1\\r\\nHISTORY_LINE_ONE\\r\\nVISIBLE_PROMPT$ \\r\\n%%end %d %d 1\\r\\n' $i $i $i $i
-      printf '%%output %%0 BANNER_FROM_LIVE\\r\\n' ;;
+      printf '%%begin %d %d 1\\nHISTORY_LINE_ONE\\nVISIBLE_PROMPT$ \\n%%end %d %d 1\\n' $i $i $i $i
+      printf '%%output %%0 BANNER_FROM_LIVE\\n' ;;
     *)
-      printf '%%begin %d %d 1\\r\\n%%end %d %d 1\\r\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\n%%end %d %d 1\\n' $i $i $i $i ;;
   esac
 done
 "

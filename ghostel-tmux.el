@@ -128,11 +128,11 @@ or nil) and PANE-ID (integer).  Must return a string."
 ;; Internal state — controller buffer
 
 ;; The "controller" holds all parser state and dispatches notifications to
-;; pane buffers: a hidden buffer owning a tmux -CC subprocess, or the host
+;; pane buffers: a hidden buffer owning a `tmux -C' subprocess, or the host
 ;; buffer of a takeover.
 
 (defvar-local ghostel-tmux--controller-process nil
-  "The tmux -CC subprocess hosted in this controller buffer.")
+  "The `tmux -C' subprocess hosted in this controller buffer.")
 
 (defvar-local ghostel-tmux--parser-state 'preamble
   "Wire-format parser state.
@@ -365,10 +365,11 @@ Each record is (PANE-ID WIDTH HEIGHT X Y)."
 
 ;; Wire-format parser
 
-;; tmux -CC emits a stream framed line-by-line.  States:
+;; Control mode emits a stream framed line-by-line.  States:
 ;;
-;;   preamble     -- before the DCS `\eP1000p'.  Drop bytes until we see it
-;;                   (or until we see the first `%' if the DCS was lost).
+;;   preamble     -- before the DCS `\eP1000p' of `tmux -CC'.  Drop bytes
+;;                   until we see it, or until the first `%' (`tmux -C'
+;;                   sends no DCS).
 ;;   idle         -- between notifications.  Protocol lines begin with `%'
 ;;                   (or `\e\\' to end DCS); bare lines are dropped — tmux
 ;;                   delivers async `run-shell' output as bare lines outside
@@ -400,9 +401,9 @@ Splits on newlines, dispatches per-line via the state machine."
               (substring ghostel-tmux--line-buffer (+ p 7)))
         (setq ghostel-tmux--parser-state 'idle))))
   (when (eq ghostel-tmux--parser-state 'preamble)
-    ;; Some tmux configurations may not send the DCS; if we ever see a
-    ;; `%' at line-start, switch to idle.  Anything before that `%' is
-    ;; dispatched as idle lines, where non-protocol lines are dropped.
+    ;; `tmux -C' sends no DCS: a `%' at line-start switches to idle.
+    ;; Anything before that `%' is dispatched as idle lines, where
+    ;; non-protocol lines are dropped.
     (when (string-match-p "^%" ghostel-tmux--line-buffer)
       (setq ghostel-tmux--parser-state 'idle)))
   (when (memq ghostel-tmux--parser-state '(idle block))
@@ -570,7 +571,7 @@ window first."
 
 (defun ghostel-tmux-reset ()
   "Reset the tmux session this buffer belongs to.
-Kills a dedicated `tmux -CC' subprocess or exits control mode in an
+Kills a dedicated `tmux -C' subprocess or exits control mode in an
 auto-takeover host; pane buffers are sealed read-only or killed, see
 `ghostel-tmux-keep-detached-panes'.  Escape hatch for a wedged parser."
   (interactive)
@@ -656,8 +657,8 @@ auto-takeover host; pane buffers are sealed read-only or killed, see
 ;; Controller output channel
 
 ;; A controller comes in two shapes.  A *dedicated* controller (from
-;; `ghostel-tmux-attach' / `ghostel-tmux-new') owns a plain `tmux -CC'
-;; subprocess whose stdin accepts commands directly.  An *auto-takeover
+;; `ghostel-tmux-attach' / `ghostel-tmux-new') owns a `tmux -C' subprocess
+;; on a pipe whose stdin accepts commands directly.  An *auto-takeover
 ;; host* rides an existing ghostel shell's PTY: commands must go through
 ;; the terminal, as `ghostel-send-string' with RAW does, because with the
 ;; native PTY backend the buffer's process is only the event pipe —
@@ -1502,12 +1503,12 @@ encoded to its UTF-8 byte representation before hex-encoding."
 (defconst ghostel-tmux--send-keys-chunk-bytes 512
   "Maximum number of source bytes per `send-keys -H' command.
 At 3 chars/byte plus the header, that is about 1.6 KB per line, well
-under the typical 4 KB limit of the PTY's line discipline.")
+under the typical 4 KB limit of a PTY's line discipline.")
 
 (defun ghostel-tmux--send-bytes-from-pane (controller pane-id data)
   "Send DATA bytes to tmux PANE-ID via CONTROLLER as `send-keys -H'.
-Long DATA is split into several commands, as a line longer than the
-controller PTY's input buffer is truncated."
+Long DATA is split into several commands, as a line longer than a
+PTY's input buffer is truncated."
   (when (and data (> (length data) 0)
              (buffer-live-p controller))
     (let ((unibytes (if (multibyte-string-p data)
@@ -1530,14 +1531,14 @@ controller PTY's input buffer is truncated."
 ;; Process filter / sentinel
 
 (defun ghostel-tmux--filter (proc string)
-  "Process filter for the tmux -CC subprocess PROC; STRING is fresh output."
+  "Process filter for the `tmux -C' subprocess PROC; STRING is fresh output."
   (let ((buf (process-buffer proc)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (ghostel-tmux--feed-bytes string)))))
 
 (defun ghostel-tmux--sentinel (proc event)
-  "Sentinel for the tmux -CC subprocess.  PROC ended with EVENT.
+  "Sentinel for the `tmux -C' subprocess.  PROC ended with EVENT.
 When the controller dies — whether cleanly or because tmux got killed
 externally — each pane buffer is sealed or killed, see
 `ghostel-tmux-keep-detached-panes', also when the controller buffer
@@ -1895,17 +1896,17 @@ inert so a TUI program inside the pane receives the keystroke raw."
              ghostel-tmux--panes)))
 
 (define-derived-mode ghostel-tmux-control-mode special-mode "Ghostel-tmux-ctl"
-  "Hidden buffer hosting the tmux -CC subprocess."
+  "Hidden buffer hosting the `tmux -C' subprocess."
   (buffer-disable-undo)
   (setq buffer-read-only t
         ghostel-tmux--panes (make-hash-table)
         ghostel-tmux--windows (make-hash-table))
-  ;; A killed controller buffer must not leave a zombie tmux -CC; the
+  ;; A killed controller buffer must not leave a zombie `tmux -C'; the
   ;; sentinel then seals or kills the panes.
   (add-hook 'kill-buffer-hook #'ghostel-tmux--controller-killed nil t))
 
 (defun ghostel-tmux--controller-killed ()
-  "Tear down the tmux -CC subprocess when its controller buffer dies."
+  "Tear down the `tmux -C' subprocess when its controller buffer dies."
   (when (and ghostel-tmux--controller-process
              (process-live-p ghostel-tmux--controller-process))
     (delete-process ghostel-tmux--controller-process)))
@@ -3244,9 +3245,9 @@ A non-zero exit (no server running) counts as no sessions."
     (user-error "Ghostel-tmux: No directory %s" default-directory)))
 
 (defun ghostel-tmux--spawn-controller (session tmux-args)
-  "Spawn a tmux -CC subprocess as a controller buffer.
+  "Spawn a `tmux -C' subprocess on a pipe as a controller buffer.
 SESSION is the user-visible session label.  TMUX-ARGS is the list
-of arguments after \"tmux -CC\".  `-u' keeps non-ASCII text intact in
+of arguments after \"tmux -C\".  `-u' keeps non-ASCII text intact in
 any locale.  A remote `default-directory' runs tmux on that host.
 Returns the controller buffer."
   (let ((control-buf (generate-new-buffer
@@ -3257,9 +3258,9 @@ Returns the controller buffer."
           (let* ((proc (make-process
                         :name (format "ghostel-tmux-%s" session)
                         :buffer control-buf
-                        :command `(,ghostel-tmux-program "-u" "-CC" ,@tmux-args)
+                        :command `(,ghostel-tmux-program "-u" "-C" ,@tmux-args)
                         :coding 'binary
-                        :connection-type 'pty
+                        :connection-type 'pipe
                         :file-handler t
                         :noquery t
                         :filter #'ghostel-tmux--filter
@@ -3542,7 +3543,7 @@ SESSION is an exact name.  tmux cannot address a name that starts with
   "Create or attach to tmux SESSION via control mode.
 An existing session is attached like in `ghostel-tmux-attach', as
 `new-session -A' reaches it by a raw target;
-otherwise `tmux -CC new-session -As' creates it."
+otherwise `tmux -C new-session -As' creates it."
   (interactive (list (read-string "tmux session name: " "main")))
   (when (string-empty-p session)
     (user-error "Ghostel-tmux: Empty session name"))
@@ -3584,7 +3585,7 @@ The pane buffers go, see `ghostel-tmux-keep-detached-panes'."
               (accept-process-output proc 0.2))))
         (cond
          (dedicated
-          ;; Dedicated controller buffer: kill its tmux -CC subprocess.
+          ;; Dedicated controller buffer: kill its `tmux -C' subprocess.
           (when ghostel-tmux--controller-process
             (delete-process ghostel-tmux--controller-process))
           (ghostel-tmux--seal-panes controller t))
