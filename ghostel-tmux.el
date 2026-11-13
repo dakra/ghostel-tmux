@@ -119,7 +119,8 @@ exited or tmux was killed, and go after a detach, as the session goes on in
 tmux and attaching again shows its panes.  A session whose end is not known
 counts as ended: one not detached from Emacs that was a takeover, on another
 host, or whose client was killed in Emacs.  t keeps them always, nil never.
-A split of their windows collapses to one window."
+A split of their windows collapses to one window.  Attaching to their
+session again makes them live panes."
   :type '(choice (const :tag "When the session ended" ended)
                  (const :tag "Always" t)
                  (const :tag "Never" nil))
@@ -188,7 +189,8 @@ fitted or checked, :resize-pending (see `ghostel-tmux--tile-resize'),
 and :swap-order and :swap-query (see `ghostel-tmux--tile-swap').")
 
 (defvar-local ghostel-tmux--detaching nil
-  "Non-nil once `ghostel-tmux-detach' detached the session.")
+  "Non-nil once `ghostel-tmux-detach' detached the session.
+The value `keep' keeps its pane buffers, see `ghostel-tmux--keep-panes-p'.")
 
 (defvar-local ghostel-tmux--client-size nil
   "The size last sent with `refresh-client -C', as (COLS . ROWS).")
@@ -253,6 +255,11 @@ Never set in a pane buffer or a dedicated controller: see
 
 (defvar-local ghostel-tmux--window-id nil
   "Integer tmux window id this pane belongs to.")
+
+(defvar-local ghostel-tmux--server-key nil
+  "The tmux server's host, pid and start time, or nil before known.
+Set in a controller and in its pane buffers: pane ids are unique on a
+server, so a sealed pane of the same key and id is that pane again.")
 
 (defvar-local ghostel-tmux--initialized nil
   "Non-nil once the initial capture-pane backfill has completed.
@@ -555,11 +562,13 @@ that session."
 
 (defun ghostel-tmux--keep-panes-p (alive)
   "Return non-nil when the panes of a session that left stay as snapshots.
-ALIVE is non-nil when the session goes on in tmux.  See
+ALIVE is non-nil when the session goes on in tmux, `keep' when it was
+detached with KEEP, see `ghostel-tmux-detach'.  See
 `ghostel-tmux-keep-detached-panes'."
-  (if (eq ghostel-tmux-keep-detached-panes 'ended)
-      (not alive)
-    ghostel-tmux-keep-detached-panes))
+  (cond
+   ((eq alive 'keep))
+   ((eq ghostel-tmux-keep-detached-panes 'ended) (not alive))
+   (t ghostel-tmux-keep-detached-panes)))
 
 (defun ghostel-tmux--controller-panes (controller)
   "Return the pane buffers of CONTROLLER.
@@ -767,9 +776,22 @@ A nil WINDOW-NAME (we haven't been told yet) is rendered as
           (or window-name "<unnamed>")
           pane-id))
 
+(defun ghostel-tmux--find-snapshot (server-key pane-id)
+  "Return a sealed buffer of pane PANE-ID on the server SERVER-KEY, or nil."
+  (and server-key
+       (cl-find-if
+        (lambda (buf)
+          (and (buffer-local-value 'ghostel-tmux-pane-mode buf)
+               (null (buffer-local-value 'ghostel-tmux--controller-buffer buf))
+               (eql (buffer-local-value 'ghostel-tmux--pane-id buf) pane-id)
+               (equal (buffer-local-value 'ghostel-tmux--server-key buf)
+                      server-key)))
+        (buffer-list))))
+
 (defun ghostel-tmux--get-or-create-pane (controller pane-id window-id
                                                     &optional window-name)
-  "Return the pane buffer for PANE-ID under CONTROLLER, creating if needed."
+  "Return the pane buffer for PANE-ID under CONTROLLER, creating if needed.
+A sealed buffer of the pane becomes its buffer again."
   (with-current-buffer controller
     (let ((existing (gethash pane-id ghostel-tmux--panes)))
       (cond
@@ -779,13 +801,23 @@ A nil WINDOW-NAME (we haven't been told yet) is rendered as
         existing)
        (t
         (let* ((session-name ghostel-tmux--session-name)
+               (server-key ghostel-tmux--server-key)
                (name (funcall ghostel-tmux-buffer-name-function
                               (or session-name "?")
                               window-name
                               pane-id))
-               (buf (ghostel-make-terminal name ghostel-tmux-default-rows
+               (snapshot (ghostel-tmux--find-snapshot server-key pane-id))
+               (buf (ghostel-make-terminal (or snapshot name)
+                                           ghostel-tmux-default-rows
                                            ghostel-tmux-default-cols)))
           (puthash pane-id buf ghostel-tmux--panes)
+          (when snapshot
+            (with-current-buffer snapshot
+              (rename-buffer name t)
+              (setq ghostel-tmux--initialized nil
+                    ghostel-tmux--bootstrap-pending nil)
+              (when (stringp mode-name)
+                (setq mode-name (string-remove-suffix ":detached" mode-name)))))
           (with-current-buffer buf
             ;; A local directory that is gone, such as the one an attach
             ;; started in, would fail every command run from the pane.
@@ -796,6 +828,7 @@ A nil WINDOW-NAME (we haven't been told yet) is rendered as
             (setq ghostel-tmux--controller-buffer controller
                   ghostel-tmux--pane-id pane-id
                   ghostel-tmux--window-id window-id
+                  ghostel-tmux--server-key server-key
                   ghostel-pty-out-function
                   (apply-partially #'ghostel-tmux--send-bytes-from-pane
                                    controller pane-id)
@@ -931,6 +964,12 @@ The selected window comes first."
       (when ghostel-tmux--dcs-active
         (setq ghostel-tmux--exit-reason nil)
         (ghostel-tmux--queue-until-marker "display-message -p ''" #'ignore))
+      (ghostel-tmux--queue-command
+       "display-message -p '#{host} #{pid} #{start_time}'"
+       (lambda (output)
+         (let ((key (and output (string-trim output))))
+           (setq ghostel-tmux--server-key
+                 (and key (not (string-empty-p key)) key)))))
       (ghostel-tmux--request-window-rows t))
      (changed
       ;; Switching sessions resets pane state.  Wipe and reload; the
@@ -1200,17 +1239,19 @@ FLAGS are the window's flags, nil when not known."
              (h (nth 2 size))
              (buf (ghostel-tmux--get-or-create-pane
                    controller pid wid window-name)))
-        ;; A pane that no window shows takes tmux's size.  One shown
-        ;; outside a tile has the size of its Emacs window, which
-        ;; `--resize-pane' reports to tmux; one in a tile gets it from
-        ;; `--settle-layout'.
-        (unless (get-buffer-window-list buf nil 'visible)
-          (ghostel-tmux--set-pane-size buf w h))
         (with-current-buffer buf
-          (unless (or ghostel-tmux--initialized
-                      ghostel-tmux--bootstrap-pending)
-            (setq ghostel-tmux--bootstrap-pending t)
-            (ghostel-tmux--bootstrap-pane controller pid)))))
+          (let ((new (not (or ghostel-tmux--initialized
+                              ghostel-tmux--bootstrap-pending))))
+            ;; A pane that no window shows takes tmux's size, and so does
+            ;; a new one, which can be a sealed buffer shown already.  One
+            ;; shown outside a tile has the size of its Emacs window, which
+            ;; `--resize-pane' reports to tmux; one in a tile gets it from
+            ;; `--settle-layout'.
+            (when (or new (not (get-buffer-window-list buf nil 'visible)))
+              (ghostel-tmux--set-pane-size buf w h))
+            (when new
+              (setq ghostel-tmux--bootstrap-pending t)
+              (ghostel-tmux--bootstrap-pane controller pid))))))
     ;; A layout alone does not say which pane is active: wait for the
     ;; window's rows.  An active pane that was not here and has no buffer
     ;; is a floating one, which no layout lists: the first pane stands in.
@@ -1306,20 +1347,24 @@ every tab and non-ASCII character of the row as `_'."
 Each row is `@WID<TAB>%ACTIVE-PANE<TAB>CURRENT<TAB>WINDOW-NAME<TAB>LAYOUT
 <TAB>VISIBLE-LAYOUT': window names contain spaces.
 With SEED, for the reply about the session itself, the rows also give
-the session's current window and its active pane, before any pane is
-created; later changes arrive as notifications."
+the session's current window, before any pane is created, and its active pane,
+once all are: a sealed pane made live again can be shown already, and its window
+is not to follow the active pane.  Later changes arrive as notifications."
   (let ((rows (delq nil (mapcar #'ghostel-tmux--parse-window-row
-                                (split-string output "\n" t)))))
+                                (split-string output "\n" t))))
+        active-pane)
     (when (and seed (null ghostel-tmux--current-window-id))
       (when-let* ((row (cl-find-if #'caddr rows)))
         (setq ghostel-tmux--current-window-id (car row)
-              ghostel-tmux--active-pane-id (cadr row))))
+              active-pane (cadr row))))
     (pcase-dolist (`(,wid ,active ,_current ,name ,layout ,visible) rows)
       (let ((entry (plist-put (gethash wid ghostel-tmux--windows)
                               :name name)))
         (puthash wid (plist-put entry :active-pane active)
                  ghostel-tmux--windows))
       (ghostel-tmux--on-layout-change wid layout visible))
+    (when (and active-pane (null ghostel-tmux--active-pane-id))
+      (setq ghostel-tmux--active-pane-id active-pane))
     ;; All of the session's windows, in tmux's order; a window linked
     ;; twice has two rows.
     (when rows
@@ -3136,6 +3181,7 @@ a reply while tmux stays attached: an empty line makes it leave."
         ghostel-tmux--active-pane-id nil
         ghostel-tmux--client-size nil
         ghostel-tmux--held-pane nil
+        ghostel-tmux--server-key nil
         ghostel-tmux--detaching nil))
 
 (defun ghostel-tmux--enter-control-mode (buf)
@@ -3567,8 +3613,10 @@ takes its place, recorded as active so that showing it selects nothing."
 (defun ghostel-tmux--wait-for-pane (control-buf timeout)
   "Block up to TIMEOUT seconds for CONTROL-BUF to materialize a pane.
 Switches the selected window to tmux's active pane when one appears,
-or to the first pane while the active one is unknown.  A current window
-of floating panes only keeps the selected window for a window it moves to.
+or to the first pane while the active one is unknown.  A selected window
+showing a pane already, a sealed one made live again, keeps it, and tmux
+switches to it.  A current window of floating panes only keeps the
+selected window for a window it moves to.
 A tmux that dies ends the wait; the sentinel reports it.
 A pane later than TIMEOUT still gets the window."
   (let ((target-window (selected-window))
@@ -3584,7 +3632,8 @@ A pane later than TIMEOUT still gets the window."
     (cond
      (panes
       (with-current-buffer control-buf
-        (let ((pane (ghostel-tmux--attach-pane)))
+        (let ((pane (or (car (memq (window-buffer target-window) panes))
+                        (ghostel-tmux--attach-pane))))
           (if (and (null pane)
                    ghostel-tmux--active-pane-id
                    (ghostel-tmux--floating-only-p))
@@ -3663,21 +3712,23 @@ Interactively, a prefix argument prompts for it."
         (list "new-session" "-As" (ghostel-tmux--literal-format session))))
      5.0)))
 
-(defun ghostel-tmux-detach ()
+(defun ghostel-tmux-detach (&optional keep)
   "Detach the current tmux session.
 For sessions started via `ghostel-tmux-attach' or `ghostel-tmux-new',
 kills the dedicated control-mode subprocess.  For sessions taken over
 from an existing ghostel shell (takeover), sends `detach-client' and lets
 tmux exit control mode cleanly so the underlying shell continues running.
-The pane buffers go, see `ghostel-tmux-keep-detached-panes'."
-  (interactive)
+The pane buffers go, see `ghostel-tmux-keep-detached-panes'; with KEEP
+non-nil, interactively a prefix argument, they stay read-only."
+  (interactive "P")
   (let ((controller (ghostel-tmux--active-controller)))
     (unless (buffer-live-p controller)
       (user-error "Ghostel-tmux: No active controller for this buffer"))
     (with-current-buffer controller
-      (let ((dedicated (derived-mode-p 'ghostel-tmux-control-mode)))
+      (let ((dedicated (derived-mode-p 'ghostel-tmux-control-mode))
+            (alive (if keep 'keep t)))
         (when (ghostel-tmux--controller-live-p)
-          (setq ghostel-tmux--detaching t)
+          (setq ghostel-tmux--detaching alive)
           (ghostel-tmux--queue-command "detach-client")
           (setq ghostel-tmux--closing t)
           ;; Give tmux a brief moment to acknowledge the detach (and,
@@ -3694,7 +3745,7 @@ The pane buffers go, see `ghostel-tmux-keep-detached-panes'."
           ;; Dedicated controller buffer: kill its `tmux -C' subprocess.
           (when ghostel-tmux--controller-process
             (delete-process ghostel-tmux--controller-process))
-          (ghostel-tmux--seal-panes controller t))
+          (ghostel-tmux--seal-panes controller alive))
          (t
           ;; Auto-takeover host: tmux will exit control mode in response,
           ;; the native handler sees the DCS terminator, and

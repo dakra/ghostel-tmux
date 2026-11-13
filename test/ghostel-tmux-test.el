@@ -3372,7 +3372,8 @@ tmux sends the layout that unzooms before the report of the selection."
 
 (ert-deftest ghostel-tmux-test-window-rows-seed-current-window ()
   ;; The current window is known before the first pane exists, so
-  ;; whatever shows a pane first shows the one tmux has.
+  ;; whatever shows a pane first shows the one tmux has.  The active pane
+  ;; is set once all panes exist: a pane shown already keeps its window.
   (ghostel-tmux-test--with-controller ctl
     (let ((seen nil))
       (cl-letf (((symbol-function 'ghostel-tmux--on-layout-change)
@@ -3383,7 +3384,8 @@ tmux sends the layout that unzooms before the report of the selection."
         (ghostel-tmux--receive-window-rows
          "@0\t%0\t0\ta\tbd5b,80x24,0,0,0\t\n@1\t%2\t1\tb\tbd5b,80x24,0,0,2\t"
          t))
-      (should (equal (reverse seen) '((0 1 2) (1 1 2)))))))
+      (should (equal (reverse seen) '((0 1 nil) (1 1 nil))))
+      (should (eql ghostel-tmux--active-pane-id 2)))))
 
 (ert-deftest ghostel-tmux-test-window-rows-seed-once ()
   ;; A later reply may predate a selection already on its way.
@@ -4291,9 +4293,12 @@ display-message -p %s\n"
         (should (= (length sent) 1))
         (ghostel-tmux-test--feed host ghostel-tmux-test--reply-end)
         (ghostel-tmux--pump-deferred host)
+        (should (string-prefix-p "display-message" (car sent)))
+        (ghostel-tmux-test--feed host "%begin 3 3 1\r\nh 1 2\r\n%end 3 3 1\r\n")
+        (ghostel-tmux--pump-deferred host)
         (should (string-prefix-p "list-windows" (car sent)))
         (ghostel-tmux-test--feed
-         host "%begin 3 3 1\r\n@1\t%1\t1\tw\tl\tl\r\n%end 3 3 1\r\n")
+         host "%begin 4 4 1\r\n@1\t%1\t1\tw\tl\tl\r\n%end 4 4 1\r\n")
         (should (equal rows '("@1\t%1\t1\tw\tl\tl")))))))
 
 (ert-deftest ghostel-tmux-test-send-bytes-from-pane-chunks-large ()
@@ -5973,7 +5978,139 @@ That layout is from before tmux got the tile's size."
   (let ((ghostel-tmux-keep-detached-panes t))
     (should (ghostel-tmux--keep-panes-p t)))
   (let ((ghostel-tmux-keep-detached-panes nil))
-    (should-not (ghostel-tmux--keep-panes-p nil))))
+    (should-not (ghostel-tmux--keep-panes-p nil))
+    (should (ghostel-tmux--keep-panes-p 'keep))))
+
+(ert-deftest ghostel-tmux-test-detach-with-keep-keeps-the-panes ()
+  "A detach with KEEP leaves the pane buffers as snapshots."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*pane*"))
+          (ghostel-tmux-keep-detached-panes 'ended))
+      (unwind-protect
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'process-send-string) #'ignore)
+                    ((symbol-function 'accept-process-output) #'ignore)
+                    ((symbol-function 'delete-process) #'ignore))
+            (with-current-buffer pane
+              (ghostel-tmux-pane-mode 1)
+              (setq ghostel-tmux--controller-buffer ctl
+                    ghostel-tmux--pane-id 5))
+            (setq ghostel-tmux--controller-process 'fake-proc
+                  ghostel-tmux--parser-state 'idle)
+            (puthash 5 pane ghostel-tmux--panes)
+            (ghostel-tmux-detach t)
+            (should (buffer-live-p pane))
+            (should-not (buffer-local-value 'ghostel-tmux--controller-buffer pane)))
+        (when (buffer-live-p pane) (kill-buffer pane))))))
+
+(ert-deftest ghostel-tmux-test-session-asks-for-the-server-key ()
+  "The first session asks for the server's identity before its windows."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--feed ctl "%session-changed $1 s\n")
+        (ghostel-tmux--pump-deferred ctl)
+        (should (equal (car sent)
+                       "display-message -p '#{host} #{pid} #{start_time}'\n"))
+        (ghostel-tmux-test--reply ctl "host 42 1700000000\r\n")
+        (should (equal ghostel-tmux--server-key "host 42 1700000000"))
+        (should (string-prefix-p "list-windows" (car sent)))))))
+
+(ert-deftest ghostel-tmux-test-blank-server-key-is-none ()
+  "An empty answer gives no server key, which no sealed pane matches."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (ghostel-tmux-test--with-wire ctl sent
+        (ghostel-tmux-test--feed ctl "%session-changed $1 s\n")
+        (ghostel-tmux--pump-deferred ctl)
+        (ghostel-tmux-test--reply ctl "  \r\n")
+        (should-not ghostel-tmux--server-key)))))
+
+(defmacro ghostel-tmux-test--with-snapshot (spec &rest body)
+  "Run BODY with a sealed pane buffer of pane 5 bound per SPEC.
+SPEC is (VAR SERVER-KEY CONTROLLER).  `ghostel-make-terminal' returns a
+buffer it is given."
+  (declare (indent 1))
+  (pcase-let ((`(,var ,key ,controller) spec))
+    `(let ((,var (generate-new-buffer "*ghostel-tmux:s:old%5*")))
+       (unwind-protect
+           (cl-letf (((symbol-function 'ghostel-make-terminal)
+                      (lambda (b &rest _)
+                        (if (bufferp b) b (generate-new-buffer b)))))
+             (with-current-buffer ,var
+               (ghostel-tmux-pane-mode 1)
+               (setq ghostel-tmux--pane-id 5
+                     ghostel-tmux--server-key ,key
+                     ghostel-tmux--initialized t
+                     mode-name "Ghostel:detached"))
+             (ghostel-tmux--seal-pane-buffer ,var)
+             (with-current-buffer ,var
+               (setq ghostel-tmux--controller-buffer ,controller))
+             ,@body)
+         (when (buffer-live-p ,var) (kill-buffer ,var))))))
+
+(ert-deftest ghostel-tmux-test-pane-takes-its-sealed-buffer ()
+  "A pane of the server a sealed buffer of it came from goes live in it."
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--server-key "h 1 2"
+          ghostel-tmux--session-name "s")
+    (ghostel-tmux-test--with-snapshot (old "h 1 2" nil)
+      (let ((buf (ghostel-tmux--get-or-create-pane ctl 5 0 "w")))
+        (should (eq buf old))
+        (should (equal (buffer-name buf) "*ghostel-tmux:s:w%5*"))
+        (with-current-buffer buf
+          (should (eq ghostel-tmux--controller-buffer ctl))
+          (should (equal ghostel-tmux--server-key "h 1 2"))
+          (should-not ghostel-tmux--initialized)
+          (should (equal mode-name "Ghostel"))
+          (should ghostel-pty-out-function))))))
+
+(ert-deftest ghostel-tmux-test-shown-sealed-pane-keeps-its-window ()
+  "A sealed pane shown when the session comes back is not replaced by the active one."
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--server-key "h 1 2")
+    (ghostel-tmux-test--with-snapshot (old "h 1 2" nil)
+      (let ((ghostel-tmux-split-windows nil))
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) old)
+          (cl-letf (((symbol-function 'ghostel-tmux--set-pane-size) #'ignore)
+                    ((symbol-function 'ghostel-tmux--bootstrap-pane) #'ignore))
+            (unwind-protect
+                (progn
+                  (ghostel-tmux--receive-window-rows
+                   "@0\t%6\t1\tw\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}\taaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}"
+                   t)
+                  (should (eq (gethash 5 ghostel-tmux--panes) old))
+                  (should (eq (window-buffer (selected-window)) old))
+                  (should (eql ghostel-tmux--active-pane-id 6)))
+              (when-let* ((b (gethash 6 ghostel-tmux--panes)))
+                (kill-buffer b)))))))))
+
+(ert-deftest ghostel-tmux-test-pane-of-another-server-is-new ()
+  "A sealed buffer of the same pane id on another server stays."
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--server-key "h 1 3")
+    (ghostel-tmux-test--with-snapshot (old "h 1 2" nil)
+      (let ((buf (ghostel-tmux--get-or-create-pane ctl 5 0 "w")))
+        (unwind-protect
+            (progn
+              (should-not (eq buf old))
+              (should-not (buffer-local-value 'ghostel-tmux--controller-buffer old)))
+          (kill-buffer buf))))))
+
+(ert-deftest ghostel-tmux-test-pane-of-a-live-controller-is-not-taken ()
+  "The buffer of the pane in another attach of the session stays there."
+  (ghostel-tmux-test--with-controller ctl
+    (setq ghostel-tmux--server-key "h 1 2")
+    (let ((other (generate-new-buffer " *other-ctl*")))
+      (unwind-protect
+          (ghostel-tmux-test--with-snapshot (old "h 1 2" other)
+            (let ((buf (ghostel-tmux--get-or-create-pane ctl 5 0 "w")))
+              (unwind-protect
+                  (should-not (eq buf old))
+                (kill-buffer buf))))
+        (kill-buffer other)))))
 
 (ert-deftest ghostel-tmux-test-panes-of-a-session-that-goes-on-are-killed ()
   "After a detach, the pane buffers go, collapsing their tile first."

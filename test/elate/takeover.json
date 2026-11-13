@@ -89,7 +89,7 @@
     {"wait": "until", "pred": "(elate-tmux-line-p \"BACK-OK\")"},
     {"assert": {"eval": "(not (string-match-p \"refresh-client\\\\|send-keys\\\\|select-pane\" (elate-tmux-text)))"}, "comment": "no control-mode command reached the shell"},
 
-    {"group": "re-attach", "comment": "the backfill restores the content, colors included; the old snapshot stays disconnected"},
+    {"group": "re-attach", "comment": "the backfill restores the content, colors included, in the old snapshot, which is the live pane again"},
     {"type": "tmux -CC attach -t t1"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(elate-tmux-shown)"},
@@ -102,7 +102,7 @@
     {"type": "printf 'AT%sTACHED\\n' ''"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(elate-tmux-line-p \"ATTACHED\")"},
-    {"assert": {"eval": "(with-current-buffer elate-old (condition-case nil (progn (call-interactively (key-binding (kbd \"C-t c\"))) nil) (user-error t)))"}},
+    {"assert": {"eval": "(and (eq (elate-tmux-shown) elate-old) (null (elate-tmux-sealed)))"}},
     {"wait": "idle"},
     {"assert": {"eval": "(equal (elate-tmux-q \"#{session_windows}\" \"t1\") \"1\")"}},
 

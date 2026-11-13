@@ -230,6 +230,42 @@ SPEC is (BUFFER TERM)."
       (when (buffer-live-p pane) (kill-buffer pane))
       (kill-buffer ctl))))
 
+(ert-deftest ghostel-tmux-integration-sealed-pane-goes-live-again ()
+  "A sealed pane shown in a window is the pane again on the next attach."
+  :tags '(native)
+  (let ((old (generate-new-buffer " *ghostel-tmux-int-ctl*"))
+        (ctl (generate-new-buffer " *ghostel-tmux-int-ctl*"))
+        pane)
+    (unwind-protect
+        (save-window-excursion
+          (dolist (c (list old ctl))
+            (with-current-buffer c
+              (ghostel-tmux-control-mode)
+              (setq ghostel-tmux--server-key "h 1 2")))
+          (setq pane (ghostel-tmux--get-or-create-pane old 1 0 "w"))
+          (set-window-buffer (selected-window) pane)
+          (with-current-buffer pane
+            (ghostel-write-output "OLD_SESSION_TEXT")
+            (should (string-match-p "OLD_SESSION_TEXT"
+                                    (ghostel--copy-all-text ghostel--term))))
+          (ghostel-tmux--seal-panes old)
+          (should (buffer-local-value 'buffer-read-only pane))
+          (with-current-buffer ctl
+            (cl-letf (((symbol-function 'ghostel-tmux--bootstrap-pane) #'ignore))
+              (ghostel-tmux--on-layout-change 0 "bd5b,100x30,0,0,1")))
+          (should (eq pane (gethash 1 (buffer-local-value 'ghostel-tmux--panes ctl))))
+          (should (eq (window-buffer (selected-window)) pane))
+          (with-current-buffer pane
+            (should (equal (ghostel-terminal-size) '(100 . 30)))
+            (should-not (string-match-p "OLD_SESSION_TEXT"
+                                        (or (ghostel--copy-all-text ghostel--term)
+                                            "")))
+            (should-not (string-suffix-p ":detached" mode-name))
+            (should ghostel-tmux--bootstrap-pending)))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (kill-buffer ctl)
+      (kill-buffer old))))
+
 (ert-deftest ghostel-tmux-integration-pane-output-sends-no-replies ()
   "A query in a pane's `%output' gets no reply from its terminal; tmux answers."
   :tags '(native)
