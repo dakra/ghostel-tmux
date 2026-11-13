@@ -58,6 +58,15 @@ With a remote `default-directory', it names a program on that host."
   :type 'string
   :group 'ghostel-tmux)
 
+(defcustom ghostel-tmux-socket nil
+  "The socket of the tmux server to use, or nil for the default server.
+A name is passed as `-L NAME', an absolute path as `-S PATH'.  With a
+remote `default-directory', the path is on that host.  The value for a
+host can be set with connection-local variables."
+  :type '(choice (const :tag "Default server" nil)
+                 (string :tag "Socket name or path"))
+  :group 'ghostel-tmux)
+
 (defcustom ghostel-tmux-prefix-key "C-t"
   "Key sequence used as the tmux prefix in pane buffers.
 A `kbd'-style string (e.g. \"\\`C-t'\", \"\\`C-b'\").  Changing this
@@ -3228,27 +3237,67 @@ in a dedicated window."
 
 ;; Public commands
 
+(defvar-local ghostel-tmux--server nil
+  "The tmux program and the arguments that select its server, or nil.
+A cons (PROGRAM . ARGS) of `ghostel-tmux--resolve-server'.  A controller
+buffer has the server it runs on; the commands bind it around their work.")
+
+(defun ghostel-tmux--socket-args (socket)
+  "Return the tmux arguments that select the server of SOCKET.
+SOCKET is a value of `ghostel-tmux-socket'; empty string is the default server."
+  (cond
+   ((or (null socket) (string-empty-p socket)) nil)
+   ((file-remote-p socket)
+    (user-error "Ghostel-tmux: Socket %s is not a path on the host" socket))
+   ((file-name-absolute-p socket)
+    ;; `~' expands on the host that runs tmux.
+    (list "-S" (file-local-name
+                (expand-file-name
+                 (concat (file-remote-p default-directory) socket)))))
+   (t (list "-L" socket))))
+
+(defun ghostel-tmux--resolve-server (&optional socket)
+  "Return the tmux server (PROGRAM . ARGS) for `default-directory'.
+These are the connection-local values of `ghostel-tmux-program' and
+`ghostel-tmux-socket'.  A non-nil SOCKET overrides the socket."
+  (with-connection-local-variables
+   (cons ghostel-tmux-program
+         (ghostel-tmux--socket-args (or socket ghostel-tmux-socket)))))
+
+(defun ghostel-tmux--read-socket ()
+  "With a prefix argument, prompt for a tmux socket and return it, else nil."
+  (and current-prefix-arg
+       (read-string "tmux socket (name or path, empty for the default): ")))
+
+(defun ghostel-tmux--server-label ()
+  "Return a suffix naming the server of `ghostel-tmux--server', or \"\"."
+  (if (cdr ghostel-tmux--server)
+      (concat " on " (string-join (cdr ghostel-tmux--server) " "))
+    ""))
+
 (defun ghostel-tmux--process-file (&rest args)
-  "Run tmux with ARGS, insert its stdout at point and return its exit status.
+  "Run tmux with ARGS on `ghostel-tmux--server' and return (STATUS . STDOUT).
 tmux's text is UTF-8 whatever the locale."
-  (let ((coding-system-for-read 'utf-8-unix)
+  (let ((server (or ghostel-tmux--server (ghostel-tmux--resolve-server)))
+        (coding-system-for-read 'utf-8-unix)
         (coding-system-for-write 'utf-8-unix))
-    (apply #'process-file ghostel-tmux-program nil (list t nil) nil "-u" args)))
+    (with-temp-buffer
+      (let ((status (apply #'process-file (car server) nil (list t nil) nil
+                           "-u" (append (cdr server) args))))
+        (cons status (buffer-string))))))
 
 (defun ghostel-tmux--read-session ()
   "Prompt for a tmux session name and return it.
 A non-zero exit (no server running) counts as no sessions."
-  (let* ((status nil)
-         (output (with-output-to-string
-                   (with-current-buffer standard-output
-                     (setq status
-                           (ghostel-tmux--process-file
-                            "list-sessions" "-F" "#{session_name}")))))
-         (sessions (and (eql status 0) (split-string output "\n" t)))
+  (let* ((result (ghostel-tmux--process-file
+                  "list-sessions" "-F" "#{session_name}"))
+         (sessions (and (eql (car result) 0)
+                        (split-string (cdr result) "\n" t)))
          (default (car sessions)))
     (cond
      ((null sessions)
-      (user-error "Ghostel-tmux: No tmux sessions found"))
+      (user-error "Ghostel-tmux: No tmux sessions found%s"
+                  (ghostel-tmux--server-label)))
      ((= (length sessions) 1) (car sessions))
      (t (completing-read "tmux session: " sessions nil t nil nil default)))))
 
@@ -3264,16 +3313,20 @@ A non-zero exit (no server running) counts as no sessions."
 SESSION is the user-visible session label.  TMUX-ARGS is the list
 of arguments after \"tmux -C\".  `-u' keeps non-ASCII text intact in
 any locale.  A remote `default-directory' runs tmux on that host.
+tmux is `ghostel-tmux--server', which the controller buffer keeps.
 Returns the controller buffer."
-  (let ((control-buf (generate-new-buffer
+  (let ((server (or ghostel-tmux--server (ghostel-tmux--resolve-server)))
+        (control-buf (generate-new-buffer
                       (format " *ghostel-tmux-control:%s*" session))))
     (condition-case err
         (with-current-buffer control-buf
           (ghostel-tmux-control-mode)
+          (setq ghostel-tmux--server server)
           (let* ((proc (make-process
                         :name (format "ghostel-tmux-%s" session)
                         :buffer control-buf
-                        :command `(,ghostel-tmux-program "-u" "-C" ,@tmux-args)
+                        :command `(,(car server) "-u" ,@(cdr server)
+                                   "-C" ,@tmux-args)
                         :coding 'binary
                         :connection-type 'pipe
                         :file-handler t
@@ -3524,11 +3577,10 @@ A pane later than TIMEOUT still gets the window."
 
 (defun ghostel-tmux--session-exists-p (session)
   "Return non-nil when tmux has a session named exactly SESSION."
-  (eql 0 (ignore-errors
-           (with-temp-buffer
-             (ghostel-tmux--process-file
-              "has-session"
-              "-t" (ghostel-tmux--exact-session-target session))))))
+  (eql 0 (car (ignore-errors
+                (ghostel-tmux--process-file
+                 "has-session"
+                 "-t" (ghostel-tmux--exact-session-target session))))))
 
 (defun ghostel-tmux--attach-args (session)
   "Return the tmux arguments that attach the session named exactly SESSION."
@@ -3543,34 +3595,45 @@ tmux leaves a run of `#' before `[' as it is, as a style."
    string t t))
 
 ;;;###autoload
-(defun ghostel-tmux-attach (session)
+(defun ghostel-tmux-attach (session &optional socket)
   "Attach to the tmux SESSION via control mode and materialize its panes.
 SESSION is an exact name.  tmux cannot address a name that starts with
-`$' or contains `:' this way."
-  (interactive (list (ghostel-tmux--read-session)))
+`$' or contains `:' this way.  A non-nil SOCKET is used instead of
+`ghostel-tmux-socket'; interactively, a prefix argument prompts for it."
+  (interactive
+   (let* ((socket (ghostel-tmux--read-socket))
+          (ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
+     (list (ghostel-tmux--read-session) socket)))
   (ghostel-tmux--check-spawn)
-  (ghostel-tmux--wait-for-pane
-   (ghostel-tmux--spawn-controller session (ghostel-tmux--attach-args session))
-   5.0))
+  (let ((ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
+    (ghostel-tmux--wait-for-pane
+     (ghostel-tmux--spawn-controller session
+                                     (ghostel-tmux--attach-args session))
+     5.0)))
 
 ;;;###autoload
-(defun ghostel-tmux-new (session)
+(defun ghostel-tmux-new (session &optional socket)
   "Create or attach to tmux SESSION via control mode.
 An existing session is attached like in `ghostel-tmux-attach', as
 `new-session -A' reaches it by a raw target;
-otherwise `tmux -C new-session -As' creates it."
-  (interactive (list (read-string "tmux session name: " "main")))
+otherwise `tmux -C new-session -As' creates it.
+A non-nil SOCKET is used instead of `ghostel-tmux-socket'.
+Interactively, a prefix argument prompts for it."
+  (interactive
+   (let ((socket (ghostel-tmux--read-socket)))
+     (list (read-string "tmux session name: " "main") socket)))
   (when (string-empty-p session)
     (user-error "Ghostel-tmux: Empty session name"))
   (ghostel-tmux--check-spawn)
-  (ghostel-tmux--wait-for-pane
-   (ghostel-tmux--spawn-controller
-    session
-    (if (ghostel-tmux--session-exists-p session)
-        (ghostel-tmux--attach-args session)
-      ;; tmux expands `-s' as a format.
-      (list "new-session" "-As" (ghostel-tmux--literal-format session))))
-   5.0))
+  (let ((ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
+    (ghostel-tmux--wait-for-pane
+     (ghostel-tmux--spawn-controller
+      session
+      (if (ghostel-tmux--session-exists-p session)
+          (ghostel-tmux--attach-args session)
+        ;; tmux expands `-s' as a format.
+        (list "new-session" "-As" (ghostel-tmux--literal-format session))))
+     5.0)))
 
 (defun ghostel-tmux-detach ()
   "Detach the current tmux session.
@@ -3743,27 +3806,56 @@ shows a pane of WID; the windows of the tile showing a pane are deleted then."
 ;; One-shot snapshot of a single pane (no live connection)
 
 ;;;###autoload
-(defun ghostel-tmux-capture (target)
+(defun ghostel-tmux-capture (target &optional socket)
   "Capture TARGET pane (e.g. \"session:window.pane\") into a fresh ghostel buffer.
 The buffer renders the captured bytes through a VT engine but is not
-connected to a live tmux session."
+connected to a live tmux session.  In a pane buffer of a live session,
+the session's tmux captures it.  Otherwise a non-nil SOCKET is used
+instead of `ghostel-tmux-socket'; interactively, a prefix argument
+prompts for it."
   (interactive
-   (list (read-string "tmux target (e.g. mysession:0.0 or %3): "
-                      (or (ghostel-tmux--prefix-target) ""))))
+   (let ((socket (ghostel-tmux--read-socket)))
+     (list (read-string "tmux target (e.g. mysession:0.0 or %3): "
+                        (or (and (ghostel-tmux--live-controller)
+                                 (ghostel-tmux--prefix-target))
+                            ""))
+           socket)))
   (ghostel-ensure-module)
-  (let* ((status nil)
-         (output
-          (with-output-to-string
-            (with-current-buffer standard-output
-              (setq status
-                    (ghostel-tmux--process-file
-                     "capture-pane" "-peJ"
-                     "-S" (number-to-string (- ghostel-tmux-history-lines))
-                     "-t" target))))))
-    (unless (eql status 0)
-      (user-error "Ghostel-tmux: capture-pane failed for %s" target))
-    (when (string-empty-p output)
-      (user-error "Ghostel-tmux: Empty capture for %s" target))
+  (let ((controller (ghostel-tmux--live-controller))
+        (command (list "capture-pane" "-peJC"
+                       "-S" (number-to-string (- ghostel-tmux-history-lines))
+                       "-t" target)))
+    (if (and controller (null socket))
+        (with-current-buffer controller
+          (ghostel-tmux--queue-command
+           (mapconcat #'shell-quote-argument command " ")
+           (lambda (output)
+             (condition-case err
+                 (ghostel-tmux--show-capture target output "")
+               (user-error (message "%s" (error-message-string err)))))))
+      (let* ((ghostel-tmux--server (ghostel-tmux--resolve-server socket))
+             (result (apply #'ghostel-tmux--process-file command)))
+        (ghostel-tmux--show-capture target
+                                    (and (eql (car result) 0) (cdr result))
+                                    (ghostel-tmux--server-label))))))
+
+(defun ghostel-tmux--live-controller ()
+  "Return the controller of the current pane buffer while it reaches tmux."
+  (let ((controller ghostel-tmux--controller-buffer))
+    (and (buffer-live-p controller)
+         (with-current-buffer controller
+           (and (ghostel-tmux--controller-live-p)
+                (not ghostel-tmux--closing)))
+         controller)))
+
+(defun ghostel-tmux--show-capture (target output label)
+  "Show OUTPUT of `capture-pane -peJC' of TARGET in a fresh buffer.
+A nil OUTPUT is a failed capture.  LABEL names the server in errors."
+  (unless output
+    (user-error "Ghostel-tmux: capture-pane failed for %s%s" target label))
+  (let ((rows (string-trim-right output "\n+")))
+    (when (string-empty-p rows)
+      (user-error "Ghostel-tmux: Empty capture for %s%s" target label))
     (let ((buf (ghostel-make-terminal
                 (format "*ghostel-tmux-capture:%s*" target)
                 ghostel-tmux-default-rows ghostel-tmux-default-cols)))
@@ -3773,9 +3865,7 @@ connected to a live tmux session."
         ;; Swallow typed input and query replies (OSC/DA): there is no
         ;; live pane to send them to.
         (setq ghostel-pty-out-function #'ignore)
-        ;; Rows are LF-separated and the VT engine does not synthesize CR.
-        (ghostel-write-output (string-replace "\n" "\r\n"
-                                              (string-trim-right output "\n+")))
+        (ghostel-write-output (ghostel-tmux--backfill-rows rows))
         (setq ghostel-tmux--initialized t))
       (pop-to-buffer buf))))
 

@@ -12,6 +12,7 @@
 
 (require 'cl-lib)
 (require 'ert)
+(require 'files-x)
 (require 'ghostel-tmux)
 
 (defvar ghostel-control-mode-function)
@@ -661,7 +662,7 @@ fills its output queue between the two repeats the CR."
 (ert-deftest ghostel-tmux-test-session-exists-p-asks-for-the-exact-name ()
   (let (args)
     (cl-letf (((symbol-function 'ghostel-tmux--process-file)
-               (lambda (&rest rest) (setq args rest) 1)))
+               (lambda (&rest rest) (setq args rest) '(1 . ""))))
       (should-not (ghostel-tmux--session-exists-p "proj.0"))
       (should (equal '("has-session" "-t" "=proj.0:") args)))))
 
@@ -2086,6 +2087,157 @@ tmux resizes that screen when the pane leaves the alternate one."
       (ghostel-tmux--process-file "list-sessions"))
     (should (equal seen '(("tmux" nil (t nil) nil "-u" "list-sessions")
                           utf-8-unix utf-8-unix)))))
+
+(ert-deftest ghostel-tmux-test-socket-args ()
+  "A socket name selects `-L', a path `-S' on the host of the directory."
+  (let ((default-directory "/tmp/"))
+    (dolist (case `((nil . nil)
+                    ("" . nil)
+                    ("work" . ("-L" "work"))
+                    ("/run/tmux/s" . ("-S" "/run/tmux/s"))
+                    ("~/s" . ("-S" ,(expand-file-name "~/s")))))
+      (should (equal (ghostel-tmux--socket-args (car case)) (cdr case)))))
+  (let ((default-directory "/ssh:ghostel-tmux-test-host:/home/u/"))
+    (should (equal (ghostel-tmux--socket-args "/run/tmux/s")
+                   '("-S" "/run/tmux/s")))
+    (should (equal (ghostel-tmux--socket-args "work") '("-L" "work"))))
+  (should-error (ghostel-tmux--socket-args "/ssh:ghostel-tmux-test-host:/s")
+                :type 'user-error))
+
+(ert-deftest ghostel-tmux-test-process-file-passes-the-socket ()
+  "Out-of-band calls go to the server of `ghostel-tmux-socket'."
+  (let ((ghostel-tmux-socket "work")
+        seen)
+    (cl-letf (((symbol-function 'process-file)
+               (lambda (&rest args)
+                 (setq seen args)
+                 (insert "a\n")
+                 0)))
+      (should (equal (ghostel-tmux--process-file "list-sessions")
+                     '(0 . "a\n"))))
+    (should (equal seen '("tmux" nil (t nil) nil
+                          "-u" "-L" "work" "list-sessions")))))
+
+(ert-deftest ghostel-tmux-test-no-sessions-names-the-server ()
+  (let ((ghostel-tmux-socket "work"))
+    (cl-letf (((symbol-function 'process-file) (lambda (&rest _) 1)))
+      (should (equal (cadr (should-error
+                            (let ((ghostel-tmux--server
+                                   (ghostel-tmux--resolve-server)))
+                              (ghostel-tmux--read-session))
+                            :type 'user-error))
+                     "Ghostel-tmux: No tmux sessions found on -L work")))))
+
+(ert-deftest ghostel-tmux-test-socket-argument-overrides-the-option ()
+  "The SOCKET argument wins; the empty string is the default server."
+  (let ((ghostel-tmux-socket "work")
+        servers)
+    (cl-letf (((symbol-function 'ghostel-tmux--check-spawn) #'ignore)
+              ((symbol-function 'ghostel-tmux--session-exists-p) #'always)
+              ((symbol-function 'ghostel-tmux--spawn-controller)
+               (lambda (&rest _) (push ghostel-tmux--server servers)))
+              ((symbol-function 'ghostel-tmux--wait-for-pane) #'ignore))
+      (ghostel-tmux-attach "x")
+      (ghostel-tmux-attach "x" "other")
+      (ghostel-tmux-new "x" ""))
+    (should (equal (nreverse servers)
+                   '(("tmux" "-L" "work") ("tmux" "-L" "other") ("tmux"))))))
+
+(ert-deftest ghostel-tmux-test-socket-is-connection-local ()
+  "A connection-local profile sets the socket and program of a host."
+  (let ((connection-local-profile-alist nil)
+        (connection-local-criteria-alist nil)
+        (default-directory "/ssh:ghostel-tmux-test-host:/"))
+    (connection-local-set-profile-variables
+     'ghostel-tmux-test-profile
+     '((ghostel-tmux-socket . "/run/t.sock")
+       (ghostel-tmux-program . "/opt/bin/tmux")))
+    (connection-local-set-profiles
+     '(:application tramp :machine "ghostel-tmux-test-host")
+     'ghostel-tmux-test-profile)
+    (with-temp-buffer
+      (should (equal (ghostel-tmux--resolve-server)
+                     '("/opt/bin/tmux" "-S" "/run/t.sock")))
+      (should (equal (ghostel-tmux--resolve-server "") '("/opt/bin/tmux")))
+      (should-not (local-variable-p 'ghostel-tmux-socket)))))
+
+(ert-deftest ghostel-tmux-test-prefix-argument-prompts-for-the-socket ()
+  "With a prefix argument, the sessions are listed on the socket read first."
+  (let (listed spawned)
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "work"))
+              ((symbol-function 'ghostel-tmux--read-session)
+               (lambda () (push ghostel-tmux--server listed) "s"))
+              ((symbol-function 'ghostel-tmux--check-spawn) #'ignore)
+              ((symbol-function 'ghostel-tmux--spawn-controller)
+               (lambda (&rest _) (push ghostel-tmux--server spawned)))
+              ((symbol-function 'ghostel-tmux--wait-for-pane) #'ignore))
+      (let ((current-prefix-arg '(4)))
+        (call-interactively #'ghostel-tmux-attach))
+      (let ((current-prefix-arg nil))
+        (call-interactively #'ghostel-tmux-attach)))
+    (should (equal listed '(("tmux") ("tmux" "-L" "work"))))
+    (should (equal spawned '(("tmux") ("tmux" "-L" "work"))))))
+
+(ert-deftest ghostel-tmux-test-controller-keeps-its-server ()
+  "The controller runs on the socket and keeps it for later calls."
+  (let ((ghostel-tmux-socket "work")
+        seen-cmd)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest plist)
+                 (setq seen-cmd (plist-get plist :command))
+                 'fake-proc))
+              ((symbol-function 'set-process-coding-system) #'ignore))
+      (let ((buf (ghostel-tmux--spawn-controller "demo" '("attach-session"))))
+        (unwind-protect
+            (should (equal (buffer-local-value 'ghostel-tmux--server buf)
+                           '("tmux" "-L" "work")))
+          (kill-buffer buf))))
+    (should (equal seen-cmd '("tmux" "-u" "-L" "work" "-C" "attach-session")))))
+
+(ert-deftest ghostel-tmux-test-capture-in-a-live-pane-asks-its-session ()
+  "A pane of a live session is captured over the control channel."
+  (ghostel-tmux-test--with-controller ctl
+    (setq-local ghostel-tmux--dcs-active t)
+    (let ((pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+          sent shown)
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-ensure-module) #'ignore)
+                    ((symbol-function 'process-file)
+                     (lambda (&rest _) (error "Ran tmux")))
+                    ((symbol-function 'ghostel-tmux--controller-send)
+                     (lambda (data) (push data sent)))
+                    ((symbol-function 'ghostel-tmux--show-capture)
+                     (lambda (&rest args) (setq shown args))))
+            (with-current-buffer pane
+              (setq ghostel-tmux--controller-buffer ctl)
+              (ghostel-tmux-capture "%3"))
+            (should (equal sent
+                           (list (format "capture-pane -peJC -S -%d -t \\%%3\n"
+                                         ghostel-tmux-history-lines))))
+            (ghostel-tmux-test--feed
+             ctl "%begin 1 7 1\r\nrow\\033[1m\r\n%end 1 7 1\r\n")
+            (should (equal shown '("%3" "row\\033[1m" ""))))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-capture-without-a-live-session-runs-tmux ()
+  "A pane whose session is closing is captured on the configured server."
+  (ghostel-tmux-test--with-controller ctl
+    (setq-local ghostel-tmux--dcs-active t)
+    (setq-local ghostel-tmux--closing t)
+    (let ((pane (generate-new-buffer " *ghostel-tmux-test-pane*"))
+          (ghostel-tmux-socket "work")
+          seen)
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-ensure-module) #'ignore)
+                    ((symbol-function 'process-file)
+                     (lambda (&rest args) (setq seen args) 1)))
+            (with-current-buffer pane
+              (setq ghostel-tmux--controller-buffer ctl)
+              (should (equal (cadr (should-error (ghostel-tmux-capture "%3")
+                                                 :type 'user-error))
+                             "Ghostel-tmux: capture-pane failed for %3 on -L work")))
+            (should (equal (seq-take (nthcdr 4 seen) 3) '("-u" "-L" "work"))))
+        (kill-buffer pane)))))
 
 (ert-deftest ghostel-tmux-test-layout-change-tolerates-empty-raw-flags ()
   ;; A window with no printable flags makes `#{window_raw_flags}'
