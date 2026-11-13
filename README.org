@@ -47,6 +47,22 @@ socket and program for a host can be set with connection-local variables:
  '(:application tramp :machine "build") 'my-tmux-on-build)
 #+end_src
 
+Emacs does not wait for the session: its active pane takes the selected window
+once tmux reports it.  TRAMP sets up a remote shell for every process it starts,
+which takes many round trips on a slow link.  Its direct async processes start
+=ssh= alone; they work for a single hop and are turned on for a host with:
+
+#+begin_src emacs-lisp
+(connection-local-set-profile-variables
+ 'my-direct-async '((tramp-direct-async-process . t)))
+(connection-local-set-profiles
+ '(:application tramp :machine "build") 'my-direct-async)
+#+end_src
+
+A TRAMP older than 2.7.1, as in Emacs 29, takes the connection property
+=direct-async-process= instead; see the TRAMP manual, "Improving performance of
+asynchronous remote processes".
+
 * Takeover: =tmux -CC= in a ghostel shell
 
 #+begin_src emacs-lisp

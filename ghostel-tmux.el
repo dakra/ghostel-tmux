@@ -233,11 +233,15 @@ The host has none in control mode, so that `ghostel' does not pick it.")
 
 (defvar-local ghostel-tmux--auto-host-window nil
   "When non-nil, the window to show tmux's active pane in once it is known.
-Set when a takeover starts, for the pane to replace the host's view, on
-a switch to another session, whose panes replace the ones shown, when
-the active pane or the one standing in for it goes away, and when
-`ghostel-tmux--wait-for-pane' gives up or attaches to a current window of
-floating panes only, and for a tmux window asked for by its tab.")
+Set when a takeover starts, for the pane to replace the host's view, when
+a dedicated controller starts, for its selected window, on a switch to another
+session, whose panes replace the ones shown, when the active pane or the one
+standing in for it goes away, and for a tmux window asked for by its tab.")
+
+(defvar-local ghostel-tmux--auto-host-buffer nil
+  "The buffer the window of a dedicated controller's attach showed then.
+Until tmux first lists the session's windows; that window is left alone
+once it shows another buffer.")
 
 (defvar-local ghostel-tmux--dcs-active nil
   "Non-nil when this buffer is currently inside a tmux DCS frame.
@@ -948,6 +952,10 @@ The selected window comes first."
                ghostel-tmux--panes))
     window))
 
+(defconst ghostel-tmux--window-rows-command
+  "list-windows -F \"#{window_id}\\t#{pane_id}\\t#{window_active}\\t#{window_name}\\t#{window_layout}\\t#{window_visible_layout}\""
+  "The `list-windows' command whose rows `--receive-window-rows' parses.")
+
 (defun ghostel-tmux--on-session-changed (sid name)
   "Handle `%session-changed $SID NAME'."
   (let ((first (null ghostel-tmux--session-id))
@@ -964,13 +972,30 @@ The selected window comes first."
       (when ghostel-tmux--dcs-active
         (setq ghostel-tmux--exit-reason nil)
         (ghostel-tmux--queue-until-marker "display-message -p ''" #'ignore))
-      (ghostel-tmux--queue-command
-       "display-message -p '#{host} #{pid} #{start_time}'"
-       (lambda (output)
-         (let ((key (and output (string-trim output))))
-           (setq ghostel-tmux--server-key
-                 (and key (not (string-empty-p key)) key)))))
-      (ghostel-tmux--request-window-rows t))
+      ;; The server key, which makes sealed panes live again, and the
+      ;; rows in one write: one round trip.
+      (let ((command (concat "display-message -p '#{host} #{pid} #{start_time}'\n"
+                             ghostel-tmux--window-rows-command))
+            (key-done nil))
+        (letrec ((on-block
+                  (lambda (output)
+                    (cond
+                     ((and key-done output)
+                      (ghostel-tmux--receive-window-rows output t))
+                     (key-done
+                      ;; Without rows, nothing is to fill the window later.
+                      (setq ghostel-tmux--auto-host-window nil
+                            ghostel-tmux--auto-host-buffer nil)
+                      (message "Ghostel-tmux: tmux did not list the windows of %s"
+                               ghostel-tmux--session-name))
+                     (t
+                      (let ((key (and output (string-trim output))))
+                        (setq key-done t
+                              ghostel-tmux--server-key
+                              (and key (not (string-empty-p key)) key)
+                              ghostel-tmux--command-in-flight
+                              (cons command on-block))))))))
+          (ghostel-tmux--queue-command command on-block))))
      (changed
       ;; Switching sessions resets pane state.  Wipe and reload; the
       ;; Emacs window goes on showing the new session.
@@ -980,15 +1005,11 @@ The selected window comes first."
       (ghostel-tmux--wipe-panes)
       (ghostel-tmux--request-window-rows t)))))
 
-(defconst ghostel-tmux--window-row-format
-  "#{window_id}\\t#{pane_id}\\t#{window_active}\\t#{window_name}\\t#{window_layout}\\t#{window_visible_layout}"
-  "The `list-windows -F' format that `--receive-window-rows' parses.")
-
 (defun ghostel-tmux--request-window-rows (&optional seed)
   "Ask tmux for the session's windows, which creates any pane missing.
 SEED is passed on to `ghostel-tmux--receive-window-rows'."
   (ghostel-tmux--queue-command
-   (format "list-windows -F \"%s\"" ghostel-tmux--window-row-format)
+   ghostel-tmux--window-rows-command
    (lambda (output)
      (when output
        (ghostel-tmux--receive-window-rows output seed)))))
@@ -1349,14 +1370,20 @@ Each row is `@WID<TAB>%ACTIVE-PANE<TAB>CURRENT<TAB>WINDOW-NAME<TAB>LAYOUT
 With SEED, for the reply about the session itself, the rows also give
 the session's current window, before any pane is created, and its active pane,
 once all are: a sealed pane made live again can be shown already, and its window
-is not to follow the active pane.  Later changes arrive as notifications."
+is not to follow the active pane.  The window of
+`ghostel-tmux--auto-host-window' keeps such a pane, and tmux switches to it,
+or shows the active one; the window of an attach does so only while it shows
+the buffer it showed then.  Later changes arrive as notifications."
   (let ((rows (delq nil (mapcar #'ghostel-tmux--parse-window-row
                                 (split-string output "\n" t))))
+        (kept (and seed ghostel-tmux--auto-host-window))
         active-pane)
     (when (and seed (null ghostel-tmux--current-window-id))
       (when-let* ((row (cl-find-if #'caddr rows)))
         (setq ghostel-tmux--current-window-id (car row)
               active-pane (cadr row))))
+    (when kept
+      (setq ghostel-tmux--auto-host-window nil))
     (pcase-dolist (`(,wid ,active ,_current ,name ,layout ,visible) rows)
       (let ((entry (plist-put (gethash wid ghostel-tmux--windows)
                               :name name)))
@@ -1365,6 +1392,22 @@ is not to follow the active pane.  Later changes arrive as notifications."
       (ghostel-tmux--on-layout-change wid layout visible))
     (when (and active-pane (null ghostel-tmux--active-pane-id))
       (setq ghostel-tmux--active-pane-id active-pane))
+    (when (and seed ghostel-tmux--auto-host-buffer)
+      (unless (and (window-live-p kept)
+                   (eq (window-buffer kept) ghostel-tmux--auto-host-buffer))
+        (setq kept nil))
+      (setq ghostel-tmux--auto-host-buffer nil)
+      (message "Ghostel-tmux: Attached to %s" ghostel-tmux--session-name))
+    (when (window-live-p kept)
+      (let* ((shown (window-buffer kept))
+             (pane (if (eq (buffer-local-value 'ghostel-tmux--controller-buffer
+                                               shown)
+                           (current-buffer))
+                       shown
+                     (ghostel-tmux--attach-pane))))
+        (if pane
+            (ghostel-tmux--display-pane-in-window pane kept)
+          (setq ghostel-tmux--auto-host-window kept))))
     ;; All of the session's windows, in tmux's order; a window linked
     ;; twice has two rows.
     (when rows
@@ -3388,11 +3431,15 @@ A non-zero exit (no server running) counts as no sessions."
 SESSION is the user-visible session label.  TMUX-ARGS is the list
 of arguments after \"tmux -C\".  `-u' keeps non-ASCII text intact in
 any locale.  A remote `default-directory' runs tmux on that host.
-tmux is `ghostel-tmux--server', which the controller buffer keeps.
-Returns the controller buffer."
-  (let ((server (or ghostel-tmux--server (ghostel-tmux--resolve-server)))
-        (control-buf (generate-new-buffer
-                      (format " *ghostel-tmux-control:%s*" session))))
+A remote tmux can get a terminal, as from TRAMP's direct async
+processes: raw mode keeps it from echoing commands and from cutting
+long lines.  tmux is `ghostel-tmux--server', which the controller
+buffer keeps.  The selected window waits for tmux's active pane while
+it shows the same buffer.  Returns the controller buffer."
+  (let* ((server (or ghostel-tmux--server (ghostel-tmux--resolve-server)))
+         (command `(,(car server) "-u" ,@(cdr server) "-C" ,@tmux-args))
+         (control-buf (generate-new-buffer
+                       (format " *ghostel-tmux-control:%s*" session))))
     (condition-case err
         (with-current-buffer control-buf
           (ghostel-tmux-control-mode)
@@ -3400,8 +3447,11 @@ Returns the controller buffer."
           (let* ((proc (make-process
                         :name (format "ghostel-tmux-%s" session)
                         :buffer control-buf
-                        :command `(,(car server) "-u" ,@(cdr server)
-                                   "-C" ,@tmux-args)
+                        :command
+                        (if (file-remote-p default-directory)
+                            `("sh" "-c" "stty raw -echo 2>/dev/null; exec \"$@\""
+                              "sh" ,@command)
+                          command)
                         :coding 'binary
                         :connection-type 'pipe
                         :file-handler t
@@ -3410,11 +3460,23 @@ Returns the controller buffer."
                         :sentinel #'ghostel-tmux--sentinel)))
             ;; TRAMP sets the coding of its connection after `:coding'.
             (set-process-coding-system proc 'binary 'binary)
+            ;; The last attach started in a window fills it.
+            (dolist (buf (buffer-list))
+              (when (and (eq (buffer-local-value 'major-mode buf)
+                             'ghostel-tmux-control-mode)
+                         (eq (buffer-local-value 'ghostel-tmux--auto-host-window
+                                                 buf)
+                             (selected-window)))
+                (with-current-buffer buf
+                  (setq ghostel-tmux--auto-host-window nil))))
             (setq ghostel-tmux--controller-process proc
-                  ghostel-tmux--session-name session)))
+                  ghostel-tmux--session-name session
+                  ghostel-tmux--auto-host-window (selected-window)
+                  ghostel-tmux--auto-host-buffer (window-buffer))))
       ((error quit)
        (kill-buffer control-buf)
        (signal (car err) (cdr err))))
+    (message "Ghostel-tmux: Attaching to %s..." session)
     control-buf))
 
 (defun ghostel-tmux--apply-pane-size (pane-buf window &optional defer)
@@ -3610,43 +3672,6 @@ takes its place, recorded as active so that showing it selects nothing."
           (setq ghostel-tmux--active-pane-id pid)
           buf))))
 
-(defun ghostel-tmux--wait-for-pane (control-buf timeout)
-  "Block up to TIMEOUT seconds for CONTROL-BUF to materialize a pane.
-Switches the selected window to tmux's active pane when one appears,
-or to the first pane while the active one is unknown.  A selected window
-showing a pane already, a sealed one made live again, keeps it, and tmux
-switches to it.  A current window of floating panes only keeps the
-selected window for a window it moves to.
-A tmux that dies ends the wait; the sentinel reports it.
-A pane later than TIMEOUT still gets the window."
-  (let ((target-window (selected-window))
-        (deadline (+ (float-time) timeout))
-        (proc (buffer-local-value 'ghostel-tmux--controller-process
-                                  control-buf))
-        panes)
-    (while (and (buffer-live-p control-buf)
-                (not (setq panes (ghostel-tmux--pane-list control-buf)))
-                (process-live-p proc)
-                (< (float-time) deadline))
-      (accept-process-output proc 0.1))
-    (cond
-     (panes
-      (with-current-buffer control-buf
-        (let ((pane (or (car (memq (window-buffer target-window) panes))
-                        (ghostel-tmux--attach-pane))))
-          (if (and (null pane)
-                   ghostel-tmux--active-pane-id
-                   (ghostel-tmux--floating-only-p))
-              (progn
-                (setq ghostel-tmux--auto-host-window target-window)
-                (ghostel-tmux--leave-floating-window))
-            (ghostel-tmux--display-pane-in-window (or pane (car panes))
-                                                  target-window)))))
-     ((and (process-live-p proc) (buffer-live-p control-buf))
-      (with-current-buffer control-buf
-        (setq ghostel-tmux--auto-host-window target-window))
-      (message "Ghostel-tmux: Still waiting for tmux")))))
-
 ;; A bare name is parsed as a target: `proj.0' would be pane 0 of `proj'.
 (defun ghostel-tmux--exact-session-target (session)
   "Return the tmux target of the session named exactly SESSION."
@@ -3676,17 +3701,18 @@ tmux leaves a run of `#' before `[' as it is, as a style."
   "Attach to the tmux SESSION via control mode and materialize its panes.
 SESSION is an exact name.  tmux cannot address a name that starts with
 `$' or contains `:' this way.  A non-nil SOCKET is used instead of
-`ghostel-tmux-socket'; interactively, a prefix argument prompts for it."
+`ghostel-tmux-socket'; interactively, a prefix argument prompts for it.
+Returns the controller buffer before any pane is there: tmux's active
+pane takes the selected window once tmux reports it, unless the window
+shows another buffer by then."
   (interactive
    (let* ((socket (ghostel-tmux--read-socket))
           (ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
      (list (ghostel-tmux--read-session) socket)))
   (ghostel-tmux--check-spawn)
   (let ((ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
-    (ghostel-tmux--wait-for-pane
-     (ghostel-tmux--spawn-controller session
-                                     (ghostel-tmux--attach-args session))
-     5.0)))
+    (ghostel-tmux--spawn-controller session
+                                    (ghostel-tmux--attach-args session))))
 
 ;;;###autoload
 (defun ghostel-tmux-new (session &optional socket)
@@ -3695,7 +3721,8 @@ An existing session is attached like in `ghostel-tmux-attach', as
 `new-session -A' reaches it by a raw target;
 otherwise `tmux -C new-session -As' creates it.
 A non-nil SOCKET is used instead of `ghostel-tmux-socket'.
-Interactively, a prefix argument prompts for it."
+Interactively, a prefix argument prompts for it.
+Returns before any pane is there, like `ghostel-tmux-attach'."
   (interactive
    (let ((socket (ghostel-tmux--read-socket)))
      (list (read-string "tmux session name: " "main") socket)))
@@ -3703,14 +3730,12 @@ Interactively, a prefix argument prompts for it."
     (user-error "Ghostel-tmux: Empty session name"))
   (ghostel-tmux--check-spawn)
   (let ((ghostel-tmux--server (ghostel-tmux--resolve-server socket)))
-    (ghostel-tmux--wait-for-pane
-     (ghostel-tmux--spawn-controller
-      session
-      (if (ghostel-tmux--session-exists-p session)
-          (ghostel-tmux--attach-args session)
-        ;; tmux expands `-s' as a format.
-        (list "new-session" "-As" (ghostel-tmux--literal-format session))))
-     5.0)))
+    (ghostel-tmux--spawn-controller
+     session
+     (if (ghostel-tmux--session-exists-p session)
+         (ghostel-tmux--attach-args session)
+       ;; tmux expands `-s' as a format.
+       (list "new-session" "-As" (ghostel-tmux--literal-format session))))))
 
 (defun ghostel-tmux-detach (&optional keep)
   "Detach the current tmux session.
