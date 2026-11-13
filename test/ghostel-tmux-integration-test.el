@@ -181,7 +181,7 @@ SPEC is (BUFFER TERM)."
     (let ((prompt "\e]133;A\e\\PROMPT> \e]133;B\e\\"))
       (ghostel--write-vt term (concat "output\r\n" prompt))
       (ghostel--redraw-now pane)
-      (ghostel-tmux--resize-pane 20 80)
+      (ghostel-tmux--resize-pane '(80 . 20))
       ;; tmux resized the pane and the shell repainted its prompt.
       (ghostel--write-vt term (concat "\r\e[K" prompt))
       (ghostel--redraw-now pane)
@@ -206,7 +206,7 @@ SPEC is (BUFFER TERM)."
             ;; tmux resized the pane and the shell repainted its prompt.
             (ghostel--write-vt ghostel--term (concat "\r\e[K" prompt))
             (set-window-buffer (selected-window) pane)
-            (ghostel-tmux--resize-pane 30 100)
+            (ghostel-tmux--resize-pane '(100 . 30))
             (ghostel--redraw-now pane)
             (should (string-match-p "PROMPT>"
                                     (ghostel--copy-all-text ghostel--term)))))
@@ -243,6 +243,8 @@ SPEC is (BUFFER TERM)."
               (ghostel-tmux-control-mode)
               (setq ghostel-tmux--server-key "h 1 2")))
           (setq pane (ghostel-tmux--get-or-create-pane old 1 0 "w"))
+          ;; An input method composes only in a buffer that takes edits.
+          (should-not (buffer-local-value 'buffer-read-only pane))
           (set-window-buffer (selected-window) pane)
           (with-current-buffer pane
             (ghostel-write-output "OLD_SESSION_TEXT")
@@ -256,6 +258,7 @@ SPEC is (BUFFER TERM)."
           (should (eq pane (gethash 1 (buffer-local-value 'ghostel-tmux--panes ctl))))
           (should (eq (window-buffer (selected-window)) pane))
           (with-current-buffer pane
+            (should-not buffer-read-only)
             (should (equal (ghostel-terminal-size) '(100 . 30)))
             (should-not (string-match-p "OLD_SESSION_TEXT"
                                         (or (ghostel--copy-all-text ghostel--term)
@@ -279,7 +282,7 @@ SPEC is (BUFFER TERM)."
           (setq pane (ghostel-tmux--get-or-create-pane ctl 1 0 "w"))
           (with-current-buffer pane
             (setq ghostel-tmux--initialized t
-                  ghostel-pty-out-function (lambda (data) (push data sent))))
+                  ghostel--pty-out-function (lambda (data) (push data sent))))
           (with-current-buffer ctl
             (ghostel-tmux--on-output 1 "\\033[c\\033[6n"))
           (should-not sent)
@@ -291,26 +294,13 @@ SPEC is (BUFFER TERM)."
       (kill-buffer ctl))))
 
 (ert-deftest ghostel-tmux-integration-sealed-pane-leaves-mouse-to-emacs ()
-  "A sealed pane whose program tracked the mouse scrolls and selects again."
+  "A sealed pane tracks the mouse and reports focus no more."
   :tags '(native)
   (ghostel-tmux-integration-test--with-host (pane term)
-    (dolist (mode '(1000 1002 1003))
-      (ghostel--write-vt term (format "\e[?%dh" mode))
-      (should (ghostel--mode-enabled term mode))
-      (ghostel-tmux--seal-pane-buffer pane)
+    (ghostel--write-vt term "\e[?1000h\e[?1002h\e[?1003h\e[?1004h")
+    (ghostel-tmux--seal-pane-buffer pane)
+    (dolist (mode '(1000 1002 1003 1004))
       (should-not (ghostel--mode-enabled term mode)))))
-
-(ert-deftest ghostel-tmux-integration-sealed-pane-reports-no-focus ()
-  "A sealed pane whose program asked for focus reports sends none."
-  :tags '(native)
-  (ghostel-tmux-integration-test--with-host (pane term)
-    (let ((sent nil))
-      (setq ghostel-pty-out-function (lambda (data) (push data sent)))
-      (ghostel--write-vt term "\e[?1004h")
-      (ghostel--focus-event term t)
-      (should (equal sent '("\e[I")))
-      (ghostel-tmux--seal-pane-buffer pane)
-      (should-not (ghostel--focus-event term nil)))))
 
 (provide 'ghostel-tmux-integration-test)
 

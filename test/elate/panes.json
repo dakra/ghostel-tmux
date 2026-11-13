@@ -40,6 +40,7 @@
     {"type": "printf 'TY%sPE1\\n' ''"},
     {"keys": "RET"},
     {"wait": "until", "pred": "(elate-tmux-line-p \"TYPE1\")"},
+    {"assert": {"eval": "(not buffer-read-only)"}, "comment": "an Emacs input method composes only in a buffer that takes edits"},
     {"keys": "<up> RET"},
     {"wait": "until", "pred": "(= 2 (how-many \"^TYPE1 *$\" (point-min) (point-max)))"},
     {"type": "cat"},

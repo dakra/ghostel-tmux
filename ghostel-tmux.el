@@ -5,7 +5,7 @@
 ;; Author: Daniel Kraus <daniel@kraus.my>
 ;; URL: https://github.com/dakra/ghostel-tmux
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "28.1") (ghostel "0.64.0"))
+;; Package-Requires: ((emacs "28.1") (ghostel "0.65.0"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; This file is NOT part of GNU Emacs.
@@ -34,8 +34,8 @@
 ;; `ghostel-control-mode-function'.  Each pane is a terminal of
 ;; `ghostel-make-terminal' that gets the pane's output through
 ;; `ghostel-write-output', and outbound keystrokes are routed through
-;; `ghostel-pty-out-function' to the control-mode channel as
-;; `send-keys -H' commands.
+;; its SEND function to the control-mode channel as `send-keys -H'
+;; commands.
 
 ;;; Code:
 
@@ -552,16 +552,10 @@ A takeover host may attach again later; the snapshot must not act on
 that session."
   (when (buffer-live-p pane-buf)
     (with-current-buffer pane-buf
-      (setq ghostel-pty-out-function nil
-            ghostel-resize-function nil
-            ghostel-tmux--controller-buffer nil
-            buffer-read-only t)
+      (ghostel-end-terminal)
+      (setq ghostel-tmux--controller-buffer nil)
       (when (and (stringp mode-name) (not (string-suffix-p ":detached" mode-name)))
         (setq mode-name (concat mode-name ":detached")))
-      ;; A snapshot has nowhere to send focus or mouse reports, and with
-      ;; mouse tracking on, the wheel and clicks would go to them instead
-      ;; of scrolling and selecting.
-      (ghostel-write-output "\e[?1000l\e[?1002l\e[?1003l\e[?1004l")
       (ghostel-tmux--drop-tab-line))))
 
 (defun ghostel-tmux--keep-panes-p (alive)
@@ -811,9 +805,12 @@ A sealed buffer of the pane becomes its buffer again."
                               window-name
                               pane-id))
                (snapshot (ghostel-tmux--find-snapshot server-key pane-id))
-               (buf (ghostel-make-terminal (or snapshot name)
-                                           ghostel-tmux-default-rows
-                                           ghostel-tmux-default-cols)))
+               (buf (ghostel-make-terminal
+                     (or snapshot name)
+                     :size (cons ghostel-tmux-default-cols ghostel-tmux-default-rows)
+                     :send (apply-partially #'ghostel-tmux--send-bytes-from-pane
+                                            controller pane-id)
+                     :resize #'ghostel-tmux--resize-pane)))
           (puthash pane-id buf ghostel-tmux--panes)
           (when snapshot
             (with-current-buffer snapshot
@@ -832,11 +829,7 @@ A sealed buffer of the pane becomes its buffer again."
             (setq ghostel-tmux--controller-buffer controller
                   ghostel-tmux--pane-id pane-id
                   ghostel-tmux--window-id window-id
-                  ghostel-tmux--server-key server-key
-                  ghostel-pty-out-function
-                  (apply-partially #'ghostel-tmux--send-bytes-from-pane
-                                   controller pane-id)
-                  ghostel-resize-function #'ghostel-tmux--resize-pane))
+                  ghostel-tmux--server-key server-key))
           buf))))))
 
 (defun ghostel-tmux--remove-pane (controller pane-id &optional window-id)
@@ -855,8 +848,6 @@ With WINDOW-ID, keep a pane that has moved on to another window."
                     (ghostel-tmux--standing-in-p buf))
             (ghostel-tmux--keep-lost-pane-window buf))
           (ghostel-tmux--hand-over-tile-windows buf)
-          (with-current-buffer buf
-            (setq ghostel-pty-out-function nil))
           (kill-buffer buf))))))
 
 (defun ghostel-tmux--hand-over-tile-windows (buf)
@@ -1255,9 +1246,8 @@ FLAGS are the window's flags, nil when not known."
         (ghostel-tmux--remove-pane controller pid wid)))
     (dolist (rec panes)
       (let* ((pid (nth 0 rec))
-             (size (or (assq pid visible) rec))
-             (w (nth 1 size))
-             (h (nth 2 size))
+             (leaf (or (assq pid visible) rec))
+             (size (cons (nth 1 leaf) (nth 2 leaf)))
              (buf (ghostel-tmux--get-or-create-pane
                    controller pid wid window-name)))
         (with-current-buffer buf
@@ -1269,7 +1259,7 @@ FLAGS are the window's flags, nil when not known."
             ;; `--resize-pane' reports to tmux; one in a tile gets it from
             ;; `--settle-layout'.
             (when (or new (not (get-buffer-window-list buf nil 'visible)))
-              (ghostel-tmux--set-pane-size buf w h))
+              (ghostel-tmux--set-pane-size buf size))
             (when new
               (setq ghostel-tmux--bootstrap-pending t)
               (ghostel-tmux--bootstrap-pane controller pid))))))
@@ -2069,37 +2059,35 @@ The pane lives on in tmux, so a buffer the user killed comes back."
 
 ;; Sizing
 
-(defun ghostel-tmux--set-pane-size (buf cols rows)
-  "Give the terminal of pane BUF tmux's size of COLS by ROWS.
-Do nothing when it has that size."
+(defun ghostel-tmux--set-pane-size (buf size)
+  "Give the terminal of pane BUF tmux's SIZE, (COLS . ROWS), unless it has it."
   (with-current-buffer buf
-    (unless (equal (ghostel-terminal-size) (cons cols rows))
-      (ghostel-set-size rows cols))))
+    (unless (equal (ghostel-terminal-size) size)
+      (ghostel-set-size size))))
 
-(defun ghostel-tmux--resize-pane (rows cols)
-  "Resize this pane's terminal to ROWS by COLS and report the size to tmux.
-The pane's `ghostel-resize-function'.  An unchanged grid still passes
-through, for the cell pixel size and the report: tmux's client size may
-be that of another pane's window.  The pane of a tile keeps tmux's size,
-with the cell size of its window, and the tile's size is reported
-instead, see `ghostel-tmux--tile-check'."
+(defun ghostel-tmux--resize-pane (size)
+  "Resize this pane's terminal to SIZE, (COLS . ROWS), and report it to tmux.
+The RESIZE function of `ghostel-make-terminal'.  An unchanged grid still
+passes through, for the cell pixel size and the report: tmux's client
+size may be that of another pane's window.  The pane of a tile keeps
+tmux's size, with the cell size of its window, and the tile's size is
+reported instead, see `ghostel-tmux--tile-check'."
   (let ((controller ghostel-tmux--controller-buffer))
     (if (and ghostel-tmux-split-windows
              (buffer-live-p controller)
              (ghostel-tmux--tile-windows controller ghostel-tmux--window-id))
         (progn
-          (when-let* ((size (ghostel-terminal-size)))
-            (ghostel-set-size (cdr size) (car size)))
+          (ghostel-set-size (ghostel-terminal-size))
           (ghostel-tmux--schedule-tile-check))
       ;; Committed now, before tmux hears of the size: committed later, the
       ;; resize would clear the prompt row the shell has repainted by then.
-      (ghostel-set-size rows cols)
+      (ghostel-set-size size)
       (when (buffer-live-p controller)
         (with-current-buffer controller
           (when (ghostel-tmux--controller-live-p)
-            (setq ghostel-tmux--client-size (cons cols rows))
+            (setq ghostel-tmux--client-size size)
             (ghostel-tmux--queue-command
-             (format "refresh-client -C %d,%d" cols rows))))))))
+             (format "refresh-client -C %d,%d" (car size) (cdr size)))))))))
 
 
 ;; Tiles
@@ -2694,7 +2682,7 @@ of its windows instead of fitting them."
   (when (ghostel-tmux--tile-windows (current-buffer) wid)
     (pcase-dolist (`(,pid ,w ,h) (ghostel-tmux--layout-leaves tree))
       (when-let* ((buf (gethash pid ghostel-tmux--panes)))
-        (ghostel-tmux--set-pane-size buf w h)))))
+        (ghostel-tmux--set-pane-size buf (cons w h))))))
 
 (defun ghostel-tmux--pane-window-of (wid)
   "Return a visible window outside any tile showing a pane of tmux window WID.
@@ -3991,14 +3979,11 @@ A nil OUTPUT is a failed capture.  LABEL names the server in errors."
       (user-error "Ghostel-tmux: Empty capture for %s%s" target label))
     (let ((buf (ghostel-make-terminal
                 (format "*ghostel-tmux-capture:%s*" target)
-                ghostel-tmux-default-rows ghostel-tmux-default-cols)))
+                :size (cons ghostel-tmux-default-cols ghostel-tmux-default-rows))))
       (with-current-buffer buf
         (ghostel-tmux-pane-mode 1)
         (ghostel-tmux--drop-tab-line)
-        ;; Swallow typed input and query replies (OSC/DA): there is no
-        ;; live pane to send them to.
-        (setq ghostel-pty-out-function #'ignore)
-        (ghostel-write-output (ghostel-tmux--backfill-rows rows))
+        (ghostel-write-output (ghostel-tmux--backfill-rows rows) t)
         (setq ghostel-tmux--initialized t))
       (pop-to-buffer buf))))
 

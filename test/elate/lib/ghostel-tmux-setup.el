@@ -72,7 +72,7 @@ A failure signals an error: its message must not pass for an answer."
   (seq-filter (lambda (b)
                 (and (buffer-local-value 'ghostel-tmux-pane-mode b)
                      (buffer-local-value 'ghostel-tmux--pane-id b)
-                     (buffer-local-value 'ghostel-pty-out-function b)))
+                     (buffer-local-value 'ghostel-tmux--controller-buffer b)))
               (buffer-list)))
 
 (defun elate-tmux-sealed ()
@@ -80,7 +80,7 @@ A failure signals an error: its message must not pass for an answer."
   (seq-filter (lambda (b)
                 (and (buffer-local-value 'ghostel-tmux-pane-mode b)
                      (buffer-local-value 'ghostel-tmux--pane-id b)
-                     (null (buffer-local-value 'ghostel-pty-out-function b))))
+                     (null (buffer-local-value 'ghostel-tmux--controller-buffer b))))
               (buffer-list)))
 
 (defun elate-tmux-pane (&optional id)

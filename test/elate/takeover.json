@@ -80,7 +80,7 @@
     {"eval": "(setq elate-old (current-buffer))"},
     {"keys": "C-t d"},
     {"wait": "until", "pred": "(and (not (elate-tmux-attached-p)) (eq (window-buffer) (get-buffer \"*ghostel*\")))"},
-    {"assert": {"eval": "(with-current-buffer elate-old (and buffer-read-only (null ghostel-pty-out-function)))"}},
+    {"assert": {"eval": "(with-current-buffer elate-old (and buffer-read-only (null ghostel-tmux--controller-buffer)))"}},
     {"eval": "(setq ghostel-tmux-keep-detached-panes 'ended)"},
     {"wait": "until", "pred": "(equal (elate-tmux-q \"#{session_attached}\" \"t1\") \"0\")"},
     {"wait": "until", "pred": "(elate-tmux-prompt-p)"},
