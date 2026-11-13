@@ -1241,8 +1241,7 @@ fills its output queue between the two repeats the CR."
 
 (ert-deftest ghostel-tmux-test-cycle-pane-sends-select-pane ()
   ;; `--cycle-pane' (C-t C-n / C-t C-p) sends `select-pane' to tmux
-  ;; and lets `%window-pane-changed' drive the visible switch.  No
-  ;; direct `--display-pane-in-window' call.
+  ;; and shows the pane at once.
   (let ((cmds nil)
         (displayed nil)
         (pane-a (generate-new-buffer "*test-cp-a*"))
@@ -1252,7 +1251,8 @@ fills its output queue between the two repeats the CR."
           (with-current-buffer pane-a
             (setq-local ghostel-tmux--pane-id 1))
           (with-current-buffer pane-b
-            (setq-local ghostel-tmux--pane-id 2))
+            (setq-local ghostel-tmux--pane-id 2
+                        ghostel-tmux--controller-buffer ctl))
           (cl-letf (((symbol-function 'ghostel-tmux--cmd)
                      (lambda (c) (push c cmds)))
                     ((symbol-function 'ghostel-tmux--display-pane-in-window)
@@ -1263,13 +1263,13 @@ fills its output queue between the two repeats the CR."
               (setq-local ghostel-tmux--controller-buffer ctl)
               (ghostel-tmux-next-pane)))
           (should (equal cmds '("select-pane -t %2")))
-          (should (null displayed)))
+          (should (equal displayed (list pane-b))))
       (kill-buffer pane-a)
       (kill-buffer pane-b))))
 
 (ert-deftest ghostel-tmux-test-cycle-pane-repeat-steps-on ()
-  ;; Repeats that run before tmux's report arrives step on from the
-  ;; pane last asked for, not from the buffer still shown.
+  ;; Repeats step on from the pane last asked for, also while it is not
+  ;; shown yet, as in a zoomed tile.
   (let ((cmds nil)
         (panes (list (generate-new-buffer "*test-cr-a*")
                      (generate-new-buffer "*test-cr-b*")
@@ -1282,6 +1282,8 @@ fills its output queue between the two repeats the CR."
                         (setq-local ghostel-tmux--controller-buffer ctl)))
           (cl-letf (((symbol-function 'ghostel-tmux--cmd)
                      (lambda (c) (push c cmds)))
+                    ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                     #'ignore)
                     ((symbol-function 'ghostel-tmux--pane-list)
                      (lambda (_ctl) panes)))
             (with-current-buffer (car panes)
@@ -1299,8 +1301,7 @@ fills its output queue between the two repeats the CR."
       (mapc #'kill-buffer panes))))
 
 (ert-deftest ghostel-tmux-test-switch-pane-sends-select-pane ()
-  ;; Same source-of-truth model: completing-read pane switching sends
-  ;; `select-pane' instead of directly displaying.
+  ;; The picker sends `select-pane' and shows the pane at once.
   (let ((cmds nil)
         (displayed nil)
         (pane-a (generate-new-buffer "*test-sp-a*"))
@@ -1310,7 +1311,8 @@ fills its output queue between the two repeats the CR."
           (with-current-buffer pane-a
             (setq-local ghostel-tmux--pane-id 1))
           (with-current-buffer pane-b
-            (setq-local ghostel-tmux--pane-id 2))
+            (setq-local ghostel-tmux--pane-id 2
+                        ghostel-tmux--controller-buffer ctl))
           (cl-letf (((symbol-function 'ghostel-tmux--cmd)
                      (lambda (c) (push c cmds)))
                     ((symbol-function 'ghostel-tmux--display-pane-in-window)
@@ -1323,7 +1325,7 @@ fills its output queue between the two repeats the CR."
               (setq-local ghostel-tmux--controller-buffer ctl)
               (ghostel-tmux-switch-pane)))
           (should (equal cmds '("select-pane -t %2")))
-          (should (null displayed)))
+          (should (equal displayed (list pane-b))))
       (kill-buffer pane-a)
       (kill-buffer pane-b))))
 
@@ -3993,9 +3995,12 @@ SPEC is (FOLLOWED): that variable collects followed panes."
         (ghostel-tmux-test--with-controller ctl
           (with-current-buffer pane-b
             (setq-local ghostel-tmux--pane-id 2
-                        ghostel-tmux--window-id 7))
+                        ghostel-tmux--window-id 7
+                        ghostel-tmux--controller-buffer ctl))
           (cl-letf (((symbol-function 'ghostel-tmux--cmd)
                      (lambda (c) (push c cmds)))
+                    ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                     #'ignore)
                     ((symbol-function 'ghostel-tmux--pane-list)
                      (lambda (_ctl) (list pane-a pane-b))))
             (with-current-buffer pane-a
@@ -4788,6 +4793,116 @@ collects the lines sent, newest first.  The panes are plain buffers."
     (ghostel-tmux--tile-build 0 (selected-window))
     (let ((top (car (ghostel-tmux--tile-windows ctl 0))))
       (should (= (floor (with-selected-window top (window-screen-lines))) 6)))))
+
+(ert-deftest ghostel-tmux-test-next-pane-selects-its-tile-window-at-once ()
+  "`C-t o' selects the next pane's window before tmux reports the switch."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (setq ghostel-tmux--window-order '(0))
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (select-window (car windows))
+      (setq sent nil)
+      (with-current-buffer (window-buffer (selected-window))
+        (ghostel-tmux--prefix-next-pane))
+      (should (eq (selected-window) (nth 1 windows)))
+      (should (equal (car (last sent)) "select-pane -t %6\n"))
+      (should (eql (buffer-local-value 'ghostel-tmux--active-pane-id ctl) 6))
+      ;; tmux's report changes nothing.
+      (with-current-buffer ctl
+        (ghostel-tmux--on-window-pane-changed 0 6))
+      (should (eq (selected-window) (nth 1 windows)))
+      ;; The last pane wraps around to the first.
+      (select-window (nth 2 windows))
+      (with-current-buffer (window-buffer (selected-window))
+        (ghostel-tmux--prefix-next-pane))
+      (should (eq (selected-window) (car windows))))))
+
+(ert-deftest ghostel-tmux-test-next-pane-ignores-the-report-of-a-replaced-selection ()
+  "The report of a selection that a newer one replaces does not move the view."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (setq ghostel-tmux--window-order '(0))
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (select-window (car windows))
+      (with-current-buffer (window-buffer (selected-window))
+        (ghostel-tmux--prefix-next-pane))
+      (with-current-buffer (window-buffer (selected-window))
+        (ghostel-tmux--prefix-next-pane))
+      (should (eq (selected-window) (nth 2 windows)))
+      (with-current-buffer ctl
+        (ghostel-tmux--on-window-pane-changed 0 6)
+        (should (eql ghostel-tmux--active-pane-id 7)))
+      (should (eq (selected-window) (nth 2 windows)))
+      ;; Once the selections are answered, a report is followed again.
+      (dotimes (_ 4)
+        (ghostel-tmux-test--reply ctl))
+      (with-current-buffer ctl
+        (should-not ghostel-tmux--command-in-flight)
+        (ghostel-tmux--on-window-pane-changed 0 7)
+        (ghostel-tmux--on-window-pane-changed 0 6))
+      (should (eq (selected-window) (nth 1 windows))))))
+
+(ert-deftest ghostel-tmux-test-select-pane-buffer-asks-for-a-pane-recorded-active ()
+  "A pane picked is asked for also while Emacs records it as tmux's active one."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    ;; tmux moved on to window @2, whose layout is on its way.
+    (setq ghostel-tmux--current-window-id 2
+          ghostel-tmux--pending-follow-wid 2)
+    (ghostel-tmux--select-pane-buffer (gethash 5 ghostel-tmux--panes))
+    (with-current-buffer ctl
+      (should (equal (car (last sent)) "select-pane -t %5\n"))
+      (should (member "select-window -t @0"
+                      (mapcar #'car ghostel-tmux--command-queue)))
+      (should (eql ghostel-tmux--current-window-id 0))
+      (should-not ghostel-tmux--pending-follow-wid))))
+
+(ert-deftest ghostel-tmux-test-select-pane-buffer-selects-a-zoomed-tile ()
+  "A pane that its zoomed tile lacks selects the tile; no other window shows it."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (let ((pane-6 (gethash 6 ghostel-tmux--panes)))
+      (ghostel-tmux--tile-build 0 (selected-window))
+      (puthash 0 (plist-put (gethash 0 ghostel-tmux--windows) :tree
+                            (ghostel-tmux--parse-layout-tree "bbbb,79x23,0,0,5"))
+               ghostel-tmux--windows)
+      (ghostel-tmux--tile-update 0)
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5)))
+      (let* ((tile (car (ghostel-tmux--tile-windows ctl 0)))
+             (other (split-window tile nil 'right)))
+        (set-window-buffer other (get-buffer-create "*scratch*"))
+        (select-window other)
+        (ghostel-tmux--select-pane-buffer pane-6)
+        (should (eq (selected-window) tile))
+        (should-not (get-buffer-window pane-6))
+        (with-current-buffer ctl
+          (should (member "select-pane -t %6"
+                          (mapcar #'car ghostel-tmux--command-queue))))))))
+
+(ert-deftest ghostel-tmux-test-next-pane-stays-in-its-tmux-window ()
+  "`C-t o' cycles the panes of the window shown, not those of others."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((shown nil)
+          (bufs (mapcar (lambda (pid)
+                          (let ((buf (generate-new-buffer (format "*next-%d*" pid))))
+                            (with-current-buffer buf
+                              (setq-local ghostel-tmux--controller-buffer ctl
+                                          ghostel-tmux--pane-id pid
+                                          ghostel-tmux--window-id (if (= pid 7) 1 0)))
+                            (puthash pid buf ghostel-tmux--panes)
+                            buf))
+                        '(5 6 7))))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-tmux--cmd) #'ignore)
+                    ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                     (lambda (buf _window) (push buf shown))))
+            (puthash 0 (list :panes '(5 6)) ghostel-tmux--windows)
+            (puthash 1 (list :panes '(7)) ghostel-tmux--windows)
+            (setq ghostel-tmux--window-order '(0 1))
+            (with-current-buffer (nth 1 bufs)
+              (ghostel-tmux--prefix-next-pane))
+            (should (equal shown (list (nth 0 bufs)))))
+        (mapc #'kill-buffer bufs)))))
 
 (ert-deftest ghostel-tmux-test-tile-check-keeps-a-window-showing-another-buffer ()
   "A tile window showing another buffer keeps its place; nothing is zoomed."

@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- `C-t o`, `C-t C-n`, `C-t C-p` and `C-t s` select the pane in Emacs at
+  once: keys typed before tmux reported the switch went to the pane left.
+  In a zoomed split, the pane is still shown once tmux has unzoomed.
+
+### Changed
+- `C-t o` cycles the tiled panes of the window from the one shown, so it
+  no longer reaches floating panes (tmux 3.8).
+
 ## [0.2.0] — 2026-11-11
 
 ### Added

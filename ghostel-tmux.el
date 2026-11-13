@@ -1024,7 +1024,9 @@ Runs for every switch tmux reports: `%window-pane-changed',
 `%session-window-changed', or a deferred re-trigger from
 `--on-layout-change' when a report raced ahead of the pane buffer's
 creation.  A switch made in Emacs reaches tmux through
-`--select-pane', and its report then finds the pane already shown.
+`--select-pane', and its report then finds the pane shown, unless the
+window is zoomed in a tile; the report of a switch that a newer one
+replaces is not followed, see `ghostel-tmux--selection-pending-p'.
 A pane some window already shows leaves the other windows alone.
 `ghostel-tmux--auto-host-window', the window of a pane that is gone,
 comes before any other, then the selected window on a SWITCH to
@@ -1097,10 +1099,19 @@ minibuffer selected, PID is kept for when it is left, see
      ((window-minibuffer-p (selected-window))
       (setq ghostel-tmux--held-pane pid)))))
 
+(defun ghostel-tmux--selection-pending-p (pid)
+  "Non-nil when a `select-pane' of a pane other than PID awaits its reply.
+Its report follows, so a report of PID is from a selection it replaces."
+  (cl-some (lambda (entry)
+             (and entry
+                  (string-match "\\`select-pane -t %\\([0-9]+\\)\\'" (car entry))
+                  (not (eql pid (string-to-number (match-string 1 (car entry)))))))
+           (cons ghostel-tmux--command-in-flight ghostel-tmux--command-queue)))
+
 (defun ghostel-tmux--on-window-pane-changed (wid pid)
   "Handle `%window-pane-changed @WID %PID': record and follow.
 Fires when tmux's active pane changes *within* a window (e.g. `select-pane',
-`C-t o', kill-pane auto-survivor pick), in any window of the server.
+kill-pane auto-survivor pick), in any window of the server.
 Each window's active pane is remembered so `--on-session-window-changed' can
 restore it on cycle-window; only a change in the session's current window moves
 the view.  Switching between windows is signalled by `%session-window-changed'
@@ -1109,7 +1120,8 @@ and handled separately."
     (when entry
       (puthash wid (plist-put entry :active-pane pid)
                ghostel-tmux--windows)))
-  (when (eql wid ghostel-tmux--current-window-id)
+  (when (and (eql wid ghostel-tmux--current-window-id)
+             (not (ghostel-tmux--selection-pending-p pid)))
     (setq ghostel-tmux--active-pane-id pid)
     (ghostel-tmux--follow-active-pane pid)
     ;; Following does nothing for a pane another Emacs window shows, and
@@ -1124,8 +1136,11 @@ none is recorded.  A recorded pane that is not in the window and has no
 buffer is floating, or moved in by `join-pane' from a window that lost it
 first: show the first pane, leave tmux's selection and let the next
 `--on-layout-change' settle it.  So does a window without panes yet, or
-one whose recorded pane still has its buffer elsewhere."
-  (when (eql sid ghostel-tmux--session-id)
+one whose recorded pane still has its buffer elsewhere.
+A switch that a selection on its way replaces is ignored."
+  (when (and (eql sid ghostel-tmux--session-id)
+             (not (ghostel-tmux--selection-pending-p
+                   (plist-get (gethash wid ghostel-tmux--windows) :active-pane))))
     (setq ghostel-tmux--current-window-id wid
           ghostel-tmux--pending-follow-wid nil)
     (let* ((entry (gethash wid ghostel-tmux--windows))
@@ -1781,9 +1796,11 @@ The visible switch happens reactively in `--on-session-window-changed'."
   (ghostel-tmux--cycle-window "previous-window"))
 (define-key ghostel-tmux-prefix-map (kbd "p") #'ghostel-tmux--prefix-prev-window)
 
-(ghostel-tmux--define-prefix-cmd next-pane "o"
-  (lambda (_target) "select-pane -t :.+")
-  "Cycle to the next pane in the current window.")
+(defun ghostel-tmux--prefix-next-pane ()
+  "Switch to the next pane in the current tmux window."
+  (interactive)
+  (ghostel-tmux--cycle-pane 1 ghostel-tmux--window-id))
+(define-key ghostel-tmux-prefix-map (kbd "o") #'ghostel-tmux--prefix-next-pane)
 
 (ghostel-tmux--define-prefix-cmd rename-window ","
   (lambda (_target)
@@ -3430,13 +3447,13 @@ as the window's active pane."
     (ghostel-tmux--cmd
      (ghostel-tmux--select-window-command controller window-id))))
 
-(defun ghostel-tmux--select-pane (window-id pane-id)
-  "Ask tmux to switch to PANE-ID in window WINDOW-ID, which Emacs now shows.
-Does nothing for `ghostel-tmux--active-pane-id', the pane tmux already
-has or the one standing in for a floating pane: answering a report with
-a selection would chase a newer selection forever.  The selection
-replaces a deferred follow."
-  (unless (eql pane-id ghostel-tmux--active-pane-id)
+(defun ghostel-tmux--select-pane (window-id pane-id &optional force)
+  "Ask tmux to switch to PANE-ID in window WINDOW-ID, which Emacs selected.
+Does nothing for `ghostel-tmux--active-pane-id', the pane tmux already has
+or the one standing in for a floating pane, unless FORCE: answering a report
+with a selection would chase a newer selection forever.
+The selection replaces a deferred follow."
+  (unless (and (eql pane-id ghostel-tmux--active-pane-id) (not force))
     (ghostel-tmux--send-selection (current-buffer) window-id pane-id)
     (setq ghostel-tmux--current-window-id window-id
           ghostel-tmux--active-pane-id pane-id
@@ -3493,8 +3510,7 @@ of a replaced token do nothing."
 (defun ghostel-tmux--display-pane-in-window (pane-buf window)
   "Display PANE-BUF in WINDOW and resize its terminal to fit.
 A tile of another tmux window collapses into WINDOW first.  In a tile
-of the pane's own tmux window, nothing is shown: the tile shows its
-panes."
+of the pane's own tmux window, nothing is shown: the tile shows its panes."
   (let ((tile (ghostel-tmux--tile-leaf window)))
     (when (and tile (buffer-live-p pane-buf))
       (if (and (eq (nth 0 tile) (buffer-local-value 'ghostel-tmux--controller-buffer
@@ -3686,15 +3702,24 @@ The pane buffers go, see `ghostel-tmux-keep-detached-panes'."
 (defvar ghostel-tmux--cycle-target nil
   "Pane buffer the last `ghostel-tmux--cycle-pane' asked tmux for.")
 
-(defun ghostel-tmux--cycle-pane (direction)
-  "Ask tmux to make the next pane in DIRECTION (+1 or -1) active.
-The visible switch follows tmux's reports.  A repeated cycle steps on
-from the pane it last asked for, whose report may still be on its way."
+(defun ghostel-tmux--cycle-pane (direction &optional window-id)
+  "Switch to the next pane in DIRECTION (+1 or -1).
+The panes are those of tmux window WINDOW-ID, else of all tmux windows.
+A repeated cycle steps on from the pane it last asked for, which is not
+shown yet when tmux has to unzoom its window first."
   (let* ((controller ghostel-tmux--controller-buffer)
          (panes (and (buffer-live-p controller)
-                     (ghostel-tmux--pane-list controller)))
+                     (if window-id
+                         (with-current-buffer controller
+                           (cl-remove-if-not
+                            #'buffer-live-p
+                            (mapcar (lambda (pid) (gethash pid ghostel-tmux--panes))
+                                    (plist-get (gethash window-id ghostel-tmux--windows)
+                                               :panes))))
+                       (ghostel-tmux--pane-list controller))))
          (here (if (and (memq last-command
-                              '(ghostel-tmux-next-pane ghostel-tmux-prev-pane))
+                              '(ghostel-tmux-next-pane ghostel-tmux-prev-pane
+                                ghostel-tmux--prefix-next-pane))
                         (memq ghostel-tmux--cycle-target panes))
                    ghostel-tmux--cycle-target
                  (current-buffer)))
@@ -3708,22 +3733,42 @@ from the pane it last asked for, whose report may still be on its way."
     (ghostel-tmux--select-pane-buffer target)))
 
 (defun ghostel-tmux--select-pane-buffer (pane-buf)
-  "Ask tmux to switch to the pane of PANE-BUF, also across tmux windows.
-The visible switch follows tmux's reports."
-  (let ((pid (buffer-local-value 'ghostel-tmux--pane-id pane-buf))
-        (wid (buffer-local-value 'ghostel-tmux--window-id pane-buf))
-        (controller (buffer-local-value 'ghostel-tmux--controller-buffer
-                                        pane-buf)))
+  "Switch to the pane of PANE-BUF, also across tmux windows.
+tmux is asked first.  Then a visible window showing PANE-BUF is
+selected, else the selected window shows it, so that keys typed next go
+to the pane before tmux reports the switch.  A tile of the pane's tmux
+window that lacks it, as a zoomed one, is selected instead, and shows
+the pane once tmux's layout arrives."
+  (let* ((pid (buffer-local-value 'ghostel-tmux--pane-id pane-buf))
+         (wid (buffer-local-value 'ghostel-tmux--window-id pane-buf))
+         (controller (buffer-local-value 'ghostel-tmux--controller-buffer
+                                         pane-buf))
+         (tile (and wid (buffer-live-p controller)
+                    (ghostel-tmux--tile-windows controller wid)))
+         (window (or (cl-find-if (lambda (w) (eq (window-buffer w) pane-buf)) tile)
+                     (get-buffer-window pane-buf 'visible))))
     (when pid
-      (when (and wid (buffer-live-p controller))
-        (with-current-buffer controller
-          (ghostel-tmux--cancel-zooming wid pid)))
-      (ghostel-tmux--send-selection controller wid pid))))
+      (unless (buffer-live-p controller)
+        (user-error "Ghostel-tmux: No active controller"))
+      (with-current-buffer controller
+        (when wid
+          (ghostel-tmux--cancel-zooming wid pid))
+        (ghostel-tmux--select-pane wid pid t))
+      (cond
+       (window
+        (select-window window)
+        (unless (ghostel-tmux--tile-leaf window)
+          (ghostel-tmux--apply-pane-size pane-buf window)))
+       (tile
+        (unless (memq (selected-window) tile)
+          (select-window (car tile))))
+       (t
+        (ghostel-tmux--display-pane-in-window pane-buf (selected-window)))))))
 
 (defun ghostel-tmux-switch-pane ()
   "Switch to a sibling pane via `completing-read'.
-The visible switch follows tmux's reports.  The choices stay current
-while the prompt is open, as tmux can rename a window at any time."
+The choices stay current while the prompt is open, as tmux can rename
+a window at any time."
   (interactive)
   (let ((controller ghostel-tmux--controller-buffer))
     (cl-flet ((panes ()
