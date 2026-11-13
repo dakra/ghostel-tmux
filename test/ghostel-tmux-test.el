@@ -427,6 +427,112 @@ fills its output queue between the two repeats the CR."
         (should (string-prefix-p "send-keys -t %0 -H "
                                  (caar ghostel-tmux--command-queue)))))))
 
+(ert-deftest ghostel-tmux-test-send-bytes-joins-queued-keys ()
+  ;; Keys typed while a command is in flight join the `send-keys' of
+  ;; the same pane at the end of the queue.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (with-current-buffer ctl
+        (setq ghostel-tmux--controller-process 'fake-proc
+              ghostel-tmux--command-in-flight (cons "list-windows" #'ignore)))
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'process-send-string)
+                 (lambda (_p s) (push s sent))))
+        (ghostel-tmux--send-bytes-from-pane ctl 1 "ab")
+        (ghostel-tmux--send-bytes-from-pane ctl 1 "c")
+        (with-current-buffer ctl
+          (should (equal (mapcar #'car ghostel-tmux--command-queue)
+                         '("send-keys -t %1 -H 61 62 63"))))
+        ;; Another pane's keys, then any other command, end the run.
+        (ghostel-tmux--send-bytes-from-pane ctl 10 "d")
+        (ghostel-tmux--send-bytes-from-pane ctl 1 "e")
+        (with-current-buffer ctl
+          (ghostel-tmux--queue-command "select-pane -t %1"))
+        (ghostel-tmux--send-bytes-from-pane ctl 1 "f")
+        (with-current-buffer ctl
+          (should (equal (mapcar #'car ghostel-tmux--command-queue)
+                         '("send-keys -t %1 -H 61 62 63"
+                           "send-keys -t %10 -H 64"
+                           "send-keys -t %1 -H 65"
+                           "select-pane -t %1"
+                           "send-keys -t %1 -H 66")))))
+      (should (null sent)))))
+
+(ert-deftest ghostel-tmux-test-send-bytes-joins-up-to-chunk ()
+  ;; A joined command holds at most `--send-keys-chunk-bytes' bytes.
+  (ghostel-tmux-test--with-controller ctl
+    (with-current-buffer ctl
+      (setq ghostel-tmux--controller-process 'fake-proc
+            ghostel-tmux--command-in-flight (cons "list-windows" #'ignore)))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-string) #'ignore))
+      (ghostel-tmux--send-bytes-from-pane
+       ctl 0 (make-string (1- ghostel-tmux--send-keys-chunk-bytes) ?a))
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "b")
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "c")
+      (with-current-buffer ctl
+        (should (= 2 (length ghostel-tmux--command-queue)))
+        (should (string-suffix-p " 61 62" (caar ghostel-tmux--command-queue)))
+        (should (equal (car (nth 1 ghostel-tmux--command-queue))
+                       "send-keys -t %0 -H 63"))))))
+
+(ert-deftest ghostel-tmux-test-send-bytes-joined-keys-on-the-wire ()
+  ;; The joined command goes out as one line once the reply to the
+  ;; command in flight arrives.
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil))
+      (with-current-buffer ctl
+        (setq ghostel-tmux--controller-process 'fake-proc
+              ghostel-tmux--parser-state 'idle
+              ghostel-tmux--command-in-flight (cons "list-windows" #'ignore)))
+      (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                ((symbol-function 'process-send-string)
+                 (lambda (_p s) (push s sent))))
+        (ghostel-tmux--send-bytes-from-pane ctl 0 "a")
+        (ghostel-tmux--send-bytes-from-pane ctl 0 "b")
+        (ghostel-tmux-test--feed ctl "%begin 1 1 1\r\n%end 1 1 1\r\n")
+        (with-current-buffer ctl
+          (ghostel-tmux--pump-command-queue)
+          (should-not ghostel-tmux--command-queue)))
+      (should (equal sent '("send-keys -t %0 -H 61 62\n"))))))
+
+(ert-deftest ghostel-tmux-test-send-bytes-not-joined-after-esc ()
+  ;; A key after a lone ESC goes in a command of its own, as the
+  ;; program would read the two together as Meta and the key.
+  (ghostel-tmux-test--with-controller ctl
+    (with-current-buffer ctl
+      (setq ghostel-tmux--controller-process 'fake-proc
+            ghostel-tmux--command-in-flight (cons "list-windows" #'ignore)))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-string) #'ignore))
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "\e")
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "k")
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "a")
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "\e")
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "\ek"))
+    (with-current-buffer ctl
+      (should (equal (mapcar #'car ghostel-tmux--command-queue)
+                     '("send-keys -t %0 -H 1b"
+                       "send-keys -t %0 -H 6b 61 1b"
+                       "send-keys -t %0 -H 1b 6b"))))))
+
+(ert-deftest ghostel-tmux-test-send-bytes-not-joined-onto-continuation ()
+  ;; A queued command with a continuation, such as a typed `send-keys',
+  ;; is not joined.
+  (ghostel-tmux-test--with-controller ctl
+    (with-current-buffer ctl
+      (setq ghostel-tmux--controller-process 'fake-proc
+            ghostel-tmux--command-in-flight (cons "list-windows" #'ignore)
+            ghostel-tmux--command-queue
+            (list (cons "send-keys -t %0 -H 61" #'ignore))))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'process-send-string) #'ignore))
+      (ghostel-tmux--send-bytes-from-pane ctl 0 "b"))
+    (with-current-buffer ctl
+      (should (equal (mapcar #'car ghostel-tmux--command-queue)
+                     '("send-keys -t %0 -H 61"
+                       "send-keys -t %0 -H 62"))))))
+
 (ert-deftest ghostel-tmux-test-pump-defers-inside-feed ()
   ;; Sends triggered from inside the feed (a continuation queueing a
   ;; follow-up command) must be deferred to a timer: a blocking process

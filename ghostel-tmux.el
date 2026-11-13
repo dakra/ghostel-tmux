@@ -1555,16 +1555,28 @@ PTY's input buffer is truncated."
                       data)))
       (with-current-buffer controller
         (when (ghostel-tmux--controller-live-p)
-          (let ((i 0)
-                (n (length unibytes))
-                (chunk ghostel-tmux--send-keys-chunk-bytes))
-            (while (< i n)
-              (let* ((end (min n (+ i chunk)))
-                     (hex (ghostel-tmux--bytes-to-hex
-                           (substring unibytes i end))))
-                (ghostel-tmux--queue-command
-                 (format "send-keys -t %%%d -H %s" pane-id hex))
-                (setq i end)))))))))
+          (let* ((i 0)
+                 (n (length unibytes))
+                 (chunk ghostel-tmux--send-keys-chunk-bytes)
+                 (prefix (format "send-keys -t %%%d -H " pane-id))
+                 (tail (car (last ghostel-tmux--command-queue))))
+            ;; Keys typed while a command is in flight join the pane's
+            ;; queued `send-keys': one round trip per burst, not per key.
+            (if (and tail
+                     (null (cdr tail))
+                     (string-prefix-p prefix (car tail))
+                     ;; A lone ESC and the next key would read as Meta.
+                     (not (string-suffix-p " 1b" (car tail)))
+                     (<= (+ (length (car tail)) (* 3 n))
+                         (+ (length prefix) (* 3 chunk))))
+                (setcar tail (concat (car tail) " "
+                                     (ghostel-tmux--bytes-to-hex unibytes)))
+              (while (< i n)
+                (let* ((end (min n (+ i chunk)))
+                       (hex (ghostel-tmux--bytes-to-hex
+                             (substring unibytes i end))))
+                  (ghostel-tmux--queue-command (concat prefix hex))
+                  (setq i end))))))))))
 
 
 ;; Process filter / sentinel
