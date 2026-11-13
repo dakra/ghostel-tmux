@@ -31,6 +31,22 @@ With a remote =default-directory=, =ghostel-tmux-new=, =ghostel-tmux-attach= and
 tmux server started this way keeps the environment of TRAMP's shell, such as
 =PAGER=cat=; start the server on the host first to avoid that.
 
+=ghostel-tmux-socket= selects a tmux server other than the default one.  With a
+prefix argument, =ghostel-tmux-new=, =ghostel-tmux-attach= and
+=ghostel-tmux-capture= prompt for it, and an empty answer is the default server.
+In a pane buffer of a live session, =ghostel-tmux-capture= asks that session's
+tmux, also in the takeover.  A path is on the host of =default-directory=, which
+also reaches a server whose =TMUX_TMPDIR= is not set in TRAMP's shell.  The
+socket and program for a host can be set with connection-local variables:
+
+#+begin_src emacs-lisp
+(connection-local-set-profile-variables
+ 'my-tmux-on-build
+ '((ghostel-tmux-socket . "/run/user/1000/tmux-1000/default")))
+(connection-local-set-profiles
+ '(:application tramp :machine "build") 'my-tmux-on-build)
+#+end_src
+
 * Takeover: =tmux -CC= in a ghostel shell
 
 #+begin_src emacs-lisp
@@ -200,6 +216,7 @@ at all stays on the hidden shell.
 | Option                              | Effect                                                                              |
 |-------------------------------------+-------------------------------------------------------------------------------------|
 | =ghostel-tmux-program=                | tmux executable.  Default ="tmux"=.                                                  |
+| =ghostel-tmux-socket=                 | tmux server: a name (=-L=) or an absolute path (=-S=).  Default =nil=, the default server. |
 | =ghostel-tmux-prefix-key=             | Prefix key in pane buffers.  Default ="C-t"=.                                        |
 | =ghostel-tmux-split-windows=          | Show the panes of a tmux window as Emacs splits.  Default =t=.                       |
 | =ghostel-tmux-keep-detached-panes=    | Keep pane buffers as read-only snapshots (=Ghostel:detached=) when the session leaves Emacs: =ended= (default) when it ended, not after a detach, =t= always, =nil= never. |
