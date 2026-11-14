@@ -5998,25 +5998,336 @@ That layout is from before tmux got the tile's size."
       (ghostel-tmux--pump-deferred ctl)
       (should (member "select-pane -t %6\n" sent)))))
 
+(defmacro ghostel-tmux-test--with-minibuffer (open &rest body)
+  "Run BODY with a minibuffer counting as open while variable OPEN is non-nil.
+BODY starts with no held calls and its own `minibuffer-exit-hook'."
+  (declare (indent 1))
+  `(let ((,open t)
+         (ghostel-tmux--held-calls nil)
+         (minibuffer-exit-hook nil))
+     (cl-letf (((symbol-function 'active-minibuffer-window)
+                (lambda () (and ,open (minibuffer-window)))))
+       ,@body)))
+
 (ert-deftest ghostel-tmux-test-leaving-the-minibuffer-follows-a-held-report ()
-  "A report held back while in the minibuffer is followed on leaving it."
+  "A report held back while in the minibuffer is followed once it has closed."
   (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,59x23,0,0{29x23,0,0,5,29x23,30,0,6}" sent
     (let ((mini (split-window (selected-window) 60 'right)))
       (set-window-buffer mini (get-buffer-create "*scratch*"))
       (ghostel-tmux--tile-build 0 (selected-window))
       (let ((windows (ghostel-tmux--tile-windows ctl 0)))
-        ;; MINI stands in for the minibuffer window.
-        (cl-letf (((symbol-function 'window-minibuffer-p) (lambda (w) (eq w mini))))
-          (select-window mini)
-          (set-buffer ctl)
-          (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
-          (should (eql ghostel-tmux--held-pane 6))
-          (should (eq (selected-window) mini))
-          (select-window (car windows))
-          (cl-letf (((symbol-function 'frame-old-selected-window) (lambda (&rest _) mini)))
-            (ghostel-tmux--selection-change (selected-frame))))
-        (should (eq (selected-window) (cadr windows)))
-        (should-not (buffer-local-value 'ghostel-tmux--held-pane ctl))))))
+        (ghostel-tmux-test--with-minibuffer open
+          ;; MINI stands in for the minibuffer window.
+          (cl-letf (((symbol-function 'window-minibuffer-p) (lambda (w) (eq w mini)))
+                    ((symbol-function 'frame-old-selected-window) (lambda (&rest _) mini)))
+            (select-window mini)
+            (set-buffer ctl)
+            (ghostel-tmux-test--feed ctl "%window-pane-changed @0 %6\r\n")
+            (should (eq (selected-window) mini))
+            (should (equal ghostel-tmux--held-calls
+                           `((,ctl ghostel-tmux--follow-held nil))))
+            (select-window (car windows))
+            (ghostel-tmux--pump-deferred ctl)
+            (setq open nil
+                  sent nil)
+            (ghostel-tmux--selection-change (selected-frame))
+            (ghostel-tmux--pump-deferred ctl)
+            (should-not sent)
+            (ghostel-tmux--run-held-calls)
+            (should (eq (selected-window) (cadr windows)))
+            (should-not ghostel-tmux--held-calls)))))))
+
+(ert-deftest ghostel-tmux-test-attach-pane-waits-for-the-minibuffer ()
+  "The pane of an attach takes its window once the minibuffer has closed."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((ghostel-tmux-split-windows nil)
+          shown)
+      (ghostel-tmux-test--with-minibuffer open
+        (cl-letf (((symbol-function 'ghostel-make-terminal)
+                   (lambda (name &rest _) (generate-new-buffer name)))
+                  ((symbol-function 'ghostel-tmux--set-pane-size) #'ignore)
+                  ((symbol-function 'ghostel-tmux--bootstrap-pane) #'ignore)
+                  ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                   (lambda (buf window) (setq shown (cons buf window)))))
+          (setq ghostel-tmux--auto-host-window (selected-window)
+                ghostel-tmux--auto-host-buffer (window-buffer))
+          (unwind-protect
+              (progn
+                (ghostel-tmux--receive-window-rows
+                 "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
+                (should (memq #'ghostel-tmux--schedule-held-calls minibuffer-exit-hook))
+                (should-not shown)
+                (setq open nil)
+                (ghostel-tmux--run-held-calls)
+                (should (equal shown (cons (gethash 6 ghostel-tmux--panes)
+                                           (selected-window))))
+                (should-not ghostel-tmux--held-calls)
+                (should-not minibuffer-exit-hook))
+            (maphash (lambda (_pid b) (kill-buffer b)) ghostel-tmux--panes)))))))
+
+(ert-deftest ghostel-tmux-test-attach-pane-held-back-leaves-another-buffer ()
+  "A window switched to another buffer from the minibuffer keeps it."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((ghostel-tmux-split-windows nil)
+          (other (generate-new-buffer " *ghostel-tmux-test-other*"))
+          shown)
+      (ghostel-tmux-test--with-minibuffer open
+        (cl-letf (((symbol-function 'ghostel-make-terminal)
+                   (lambda (name &rest _) (generate-new-buffer name)))
+                  ((symbol-function 'ghostel-tmux--set-pane-size) #'ignore)
+                  ((symbol-function 'ghostel-tmux--bootstrap-pane) #'ignore)
+                  ((symbol-function 'ghostel-tmux--display-pane-in-window)
+                   (lambda (buf _window) (setq shown buf))))
+          (setq ghostel-tmux--auto-host-window (selected-window)
+                ghostel-tmux--auto-host-buffer (window-buffer))
+          (unwind-protect
+              (save-window-excursion
+                (ghostel-tmux--receive-window-rows
+                 "@0\t%6\t1\tw\tb25d,80x24,0,0,6\tb25d,80x24,0,0,6" t)
+                (set-window-buffer (selected-window) other)
+                (setq open nil)
+                (ghostel-tmux--run-held-calls)
+                (should-not shown)
+                (should-not ghostel-tmux--auto-host-window)
+                (should-not ghostel-tmux--auto-host-buffer))
+            (kill-buffer other)
+            (maphash (lambda (_pid b) (kill-buffer b)) ghostel-tmux--panes)))))))
+
+(ert-deftest ghostel-tmux-test-floating-only-window-in-the-minibuffer-waits ()
+  "A session attached at a window of floating panes moves on after the minibuffer."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((pane (generate-new-buffer "*float-elsewhere*"))
+          (sent nil))
+      (unwind-protect
+          (ghostel-tmux-test--with-minibuffer open
+            (cl-letf (((symbol-function 'ghostel-tmux--get-or-create-pane)
+                       (lambda (_ctl pid _wid _name)
+                         (puthash pid pane ghostel-tmux--panes)
+                         (with-current-buffer pane
+                           (setq-local ghostel-tmux--initialized t))
+                         pane)))
+              (ghostel-tmux-test--with-sent ctl sent
+                (setq ghostel-tmux--auto-host-window (selected-window)
+                      ghostel-tmux--session-id 1)
+                (ghostel-tmux--receive-window-rows
+                 (concat "@0\t%0\t0\ta\tb25d,80x24,0,0,0\t\n"
+                         "@1\t%1\t1\tb\t0000,\t")
+                 t)
+                (should-not sent)
+                (setq open nil)
+                (ghostel-tmux--run-held-calls))
+              (should (equal sent '("select-window -t $1:@0")))
+              (should (eq (buffer-local-value 'ghostel-tmux--auto-host-window ctl)
+                          (selected-window)))))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-switch-reported-in-the-minibuffer-waits ()
+  "A switch tmux reports shows the pane active when the minibuffer has closed."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((ghostel-tmux-split-windows nil)
+          (b6 (generate-new-buffer "*ghostel-tmux:s:w%6*"))
+          (b7 (generate-new-buffer "*ghostel-tmux:s:w%7*"))
+          (b8 (generate-new-buffer "*ghostel-tmux:s:w%8*"))
+          shown)
+      (unwind-protect
+          (ghostel-tmux-test--with-shown-pane ctl pane
+            (dolist (b (list pane b6 b7 b8))
+              (with-current-buffer b
+                (setq-local ghostel-tmux--window-id (if (eq b pane) 0 1))))
+            (puthash 6 b6 ghostel-tmux--panes)
+            (puthash 7 b7 ghostel-tmux--panes)
+            (puthash 8 b8 ghostel-tmux--panes)
+            ;; A report that is no switch would take this window.
+            (set-window-buffer (split-window) b8)
+            (ghostel-tmux-test--with-minibuffer open
+              (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                         (lambda (buf window)
+                           (push (cons buf window) shown)
+                           (set-window-buffer window buf))))
+                (setq ghostel-tmux--current-window-id 1
+                      ghostel-tmux--active-pane-id 6)
+                (ghostel-tmux--follow-active-pane 6 t)
+                (setq ghostel-tmux--active-pane-id 7)
+                (ghostel-tmux--follow-active-pane 7)
+                (should-not shown)
+                (setq open nil)
+                (ghostel-tmux--run-held-calls)
+                (should (equal shown (list (cons b7 (selected-window))))))))
+        (kill-buffer b6)
+        (kill-buffer b7)
+        (kill-buffer b8)))))
+
+(ert-deftest ghostel-tmux-test-switch-held-back-keeps-its-window ()
+  "The window of a switch held back gets the pane also when its own pane died."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((ghostel-tmux-split-windows nil)
+          (b6 (generate-new-buffer "*ghostel-tmux:s:w%6*"))
+          shown)
+      (unwind-protect
+          (ghostel-tmux-test--with-shown-pane ctl pane
+            (with-current-buffer b6
+              (setq-local ghostel-tmux--window-id 1))
+            (puthash 6 b6 ghostel-tmux--panes)
+            (ghostel-tmux-test--with-minibuffer open
+              (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                         (lambda (buf window) (setq shown (cons buf window)))))
+                (setq ghostel-tmux--current-window-id 1
+                      ghostel-tmux--active-pane-id 6)
+                (ghostel-tmux--follow-active-pane 6 t)
+                (should (eq ghostel-tmux--auto-host-window (selected-window)))
+                ;; As when the pane shown is killed.
+                (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+                (setq open nil)
+                (ghostel-tmux--run-held-calls)
+                (should (equal shown (cons b6 (selected-window))))
+                (should-not ghostel-tmux--auto-host-window))))
+        (kill-buffer b6)))))
+
+(ert-deftest ghostel-tmux-test-layout-in-the-minibuffer-waits ()
+  "A layout that arrives in the minibuffer splits its window once it has closed."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux-test--with-minibuffer open
+      (ghostel-tmux--tile-update 0)
+      (should-not (ghostel-tmux--tile-windows ctl 0))
+      (setq open nil)
+      (ghostel-tmux--run-held-calls)
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6))))))
+
+(ert-deftest ghostel-tmux-test-tile-check-in-the-minibuffer-builds-nothing ()
+  "A tile that is not as its layout says stays in the minibuffer, its check held."
+  (ghostel-tmux-test--with-tile ctl '(5 6 7)
+      "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0[39x11,40,0,6,39x11,40,12,7]}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (delete-window (car (last (ghostel-tmux--tile-windows ctl 0))))
+    (ghostel-tmux-test--with-minibuffer open
+      (ghostel-tmux--tile-check)
+      (should (equal (ghostel-tmux-test--tile-pids ctl) '(5 6)))
+      (should (equal ghostel-tmux--held-calls
+                     `((,ctl ghostel-tmux--schedule-tile-check)))))))
+
+(ert-deftest ghostel-tmux-test-reset-drops-the-calls-held-back ()
+  "A reset drops the calls held back for its controller only."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-minibuffer open
+      (ghostel-tmux--hold #'ignore)
+      (with-temp-buffer
+        (let ((other (current-buffer)))
+          (ghostel-tmux--hold #'ignore)
+          (with-current-buffer ctl
+            (ghostel-tmux--reset-session-state))
+          (should (equal ghostel-tmux--held-calls `((,other ignore)))))))))
+
+(ert-deftest ghostel-tmux-test-held-calls-wait-for-every-minibuffer ()
+  "A nested minibuffer that closes leaves the calls for the outer one."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-minibuffer open
+      (let (ran)
+        (ghostel-tmux--hold (lambda () (setq ran t)))
+        (ghostel-tmux--run-held-calls)
+        (should-not ran)
+        (should ghostel-tmux--held-calls)
+        (setq open nil)
+        (ghostel-tmux--run-held-calls)
+        (should ran)))))
+
+(ert-deftest ghostel-tmux-test-call-held-twice-is-made-once ()
+  "A call held again is made once, after the calls held before that."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-minibuffer open
+      (let* (ran
+             (a (lambda () (push 'a ran)))
+             (b (lambda () (push 'b ran))))
+        (ghostel-tmux--hold a)
+        (ghostel-tmux--hold b)
+        (ghostel-tmux--hold a)
+        (setq open nil)
+        (ghostel-tmux--run-held-calls)
+        (should (equal ran '(a b)))))))
+
+(ert-deftest ghostel-tmux-test-held-call-of-a-killed-controller-is-dropped ()
+  (let ((dead (generate-new-buffer " *ghostel-tmux-test-dead*"))
+        ran)
+    (ghostel-tmux-test--with-minibuffer open
+      (with-current-buffer dead
+        (ghostel-tmux--hold (lambda () (setq ran t))))
+      (kill-buffer dead)
+      (setq open nil)
+      (ghostel-tmux--run-held-calls)
+      (should-not ran)
+      (should-not ghostel-tmux--held-calls))))
+
+(ert-deftest ghostel-tmux-test-held-call-that-fails-leaves-the-others ()
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-minibuffer open
+      (let (ran)
+        (ghostel-tmux--hold (lambda () (error "Failed")))
+        (ghostel-tmux--hold (lambda () (setq ran t)))
+        (setq open nil)
+        (ghostel-tmux--run-held-calls)
+        (should ran)))))
+
+(ert-deftest ghostel-tmux-test-kept-window-waits-for-the-minibuffer ()
+  "A window kept for tmux's active pane gets it once the minibuffer has closed."
+  (ghostel-tmux-test--with-controller ctl
+    (ghostel-tmux-test--with-floating-active-pane
+      (let ((ghostel-tmux-split-windows nil)
+            shown)
+        (ghostel-tmux-test--with-minibuffer open
+          (cl-letf (((symbol-function 'ghostel-tmux--display-pane-in-window)
+                     (lambda (buf window) (setq shown (cons buf window)))))
+            (setq ghostel-tmux--auto-host-window (selected-window))
+            (ghostel-tmux--on-layout-change 0 "b25d,80x24,0,0,5")
+            (should-not shown)
+            (should (eq ghostel-tmux--auto-host-window (selected-window)))
+            (setq open nil)
+            (ghostel-tmux--run-held-calls)
+            (should (equal shown (cons tiled (selected-window))))
+            (should-not ghostel-tmux--auto-host-window)))))))
+
+(ert-deftest ghostel-tmux-test-later-attach-takes-the-window-of-a-held-pane ()
+  "A later attach in a window leaves no earlier pane held back to fill it."
+  (let* ((script (ghostel-tmux-test--script "sleep 5"))
+         (ghostel-tmux-program script)
+         first second)
+    (unwind-protect
+        (ghostel-tmux-test--with-minibuffer open
+          (setq first (ghostel-tmux--spawn-controller "a" nil))
+          (with-current-buffer first
+            (ghostel-tmux--fill-kept-window (selected-window)))
+          (should ghostel-tmux--held-calls)
+          (setq open nil
+                second (ghostel-tmux--spawn-controller "b" nil))
+          (should-not ghostel-tmux--held-calls)
+          (should-not (buffer-local-value 'ghostel-tmux--auto-host-buffer first)))
+      (when (buffer-live-p first) (kill-buffer first))
+      (when (buffer-live-p second) (kill-buffer second))
+      (delete-file script))))
+
+(ert-deftest ghostel-tmux-test-window-closed-in-the-minibuffer-collapses-after-it ()
+  "The tile of a tmux window closed in the minibuffer collapses once it has closed."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (ghostel-tmux-test--with-minibuffer open
+      (ghostel-tmux--drop-window 0)
+      (ghostel-tmux--tile-check)
+      (should (= 2 (length (window-list nil 'no-mini))))
+      (setq open nil)
+      (ghostel-tmux--run-held-calls)
+      (should (= 1 (length (window-list nil 'no-mini)))))))
+
+(ert-deftest ghostel-tmux-test-selection-from-an-open-minibuffer-reaches-tmux ()
+  "A window of a tile selected while the minibuffer stays open is tmux's pane."
+  (ghostel-tmux-test--with-tile ctl '(5 6) "aaaa,79x23,0,0{39x23,0,0,5,39x23,40,0,6}" sent
+    (ghostel-tmux--tile-build 0 (selected-window))
+    (let ((windows (ghostel-tmux--tile-windows ctl 0)))
+      (ghostel-tmux-test--with-minibuffer open
+        (ghostel-tmux--hold #'ignore)
+        (select-window (cadr windows))
+        (cl-letf (((symbol-function 'frame-old-selected-window)
+                   (lambda (&rest _) (minibuffer-window))))
+          (ghostel-tmux--selection-change (selected-frame)))
+        (ghostel-tmux--pump-deferred ctl)
+        (should (member "select-pane -t %6\n" sent))))))
 
 (ert-deftest ghostel-tmux-test-sealed-panes-collapse-their-tile ()
   "Sealing a session's panes leaves one window of a tile, no longer a tile."

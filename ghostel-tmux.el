@@ -1030,7 +1030,8 @@ go of a window this session keeps, so ask.  A session that ends sends
 (defun ghostel-tmux--drop-window (wid)
   "Forget window WID and kill its pane buffers.  Its tile collapses."
   (when-let* ((windows (ghostel-tmux--tile-windows (current-buffer) wid)))
-    (ghostel-tmux--tile-collapse windows))
+    (unless (ghostel-tmux--hold #'ghostel-tmux--tile-update wid)
+      (ghostel-tmux--tile-collapse windows)))
   (let ((win (gethash wid ghostel-tmux--windows)))
     (when win
       (let ((panes (plist-get win :panes)))
@@ -1069,6 +1070,49 @@ go of a window this session keeps, so ask.  A session that ends sends
     (ghostel-tmux--rename-pane-buffers name (plist-get win :panes)))
   (ghostel-tmux--refresh-tab-line))
 
+(defvar ghostel-tmux--held-calls nil
+  "Calls waiting for the minibuffer to close, the newest first.
+Each is (CONTROLLER FUNCTION . ARGS), see `ghostel-tmux--hold'.")
+
+(defun ghostel-tmux--hold (function &rest args)
+  "Keep the call of FUNCTION with ARGS for later while a minibuffer is open.
+Return non-nil when it is kept.  Emacs shows the windows as they were
+before a minibuffer again when it closes, which would undo what tmux
+asked for meanwhile.  The call is made in this controller once no
+minibuffer is open, after the calls kept before it; one kept twice is
+made once."
+  (when (active-minibuffer-window)
+    (let ((call `(,(current-buffer) ,function ,@args)))
+      (setq ghostel-tmux--held-calls
+            (cons call (delete call ghostel-tmux--held-calls))))
+    (add-hook 'minibuffer-exit-hook #'ghostel-tmux--schedule-held-calls)
+    t))
+
+(defun ghostel-tmux--schedule-held-calls ()
+  "Run `ghostel-tmux--run-held-calls' once Emacs has the windows back."
+  (run-at-time 0 nil #'ghostel-tmux--run-held-calls))
+
+(defun ghostel-tmux--run-held-calls ()
+  "Make the calls `ghostel-tmux--hold' kept, unless a minibuffer is open.
+A call that signals an error is reported and the others are made."
+  (unless (active-minibuffer-window)
+    (remove-hook 'minibuffer-exit-hook #'ghostel-tmux--schedule-held-calls)
+    (pcase-dolist (`(,controller ,function . ,args)
+                   (nreverse (prog1 ghostel-tmux--held-calls
+                               (setq ghostel-tmux--held-calls nil))))
+      (when (buffer-live-p controller)
+        (with-current-buffer controller
+          (condition-case err
+              (apply function args)
+            (error
+             (message "Ghostel-tmux: Error in %s: %s"
+                      function (error-message-string err)))))))))
+
+(defun ghostel-tmux--follow-held (switch)
+  "Follow the pane tmux has active now, for a report held back.
+SWITCH is as for `ghostel-tmux--follow-active-pane'."
+  (ghostel-tmux--follow-active-pane ghostel-tmux--active-pane-id switch))
+
 (defun ghostel-tmux--follow-active-pane (new-pid &optional switch)
   "Redirect an Emacs window showing a sibling pane to NEW-PID.
 Runs for every switch tmux reports: `%window-pane-changed',
@@ -1083,7 +1127,10 @@ A pane some window already shows leaves the other windows alone.
 comes before any other, then the selected window on a SWITCH to
 another tmux window, then a window showing a pane of the same tmux
 window.  In a tile, the window of NEW-PID is selected instead, when
-the selected window is one of the tile's, and the tile's size reported."
+the selected window is one of the tile's, and the tile's size reported.
+Outside a tile, the window found waits for the minibuffer to close as
+`ghostel-tmux--auto-host-window', and then gets the pane tmux has
+active, see `ghostel-tmux--hold'."
   (let* ((new-buf (and new-pid ghostel-tmux--panes
                        (gethash new-pid ghostel-tmux--panes)))
          (tile (and ghostel-tmux-split-windows
@@ -1101,6 +1148,7 @@ the selected window is one of the tile's, and the tile's size reported."
        (buffer-local-value 'ghostel-tmux--window-id new-buf)))
      (t
       (let ((wid (buffer-local-value 'ghostel-tmux--window-id new-buf))
+            (selected (or (minibuffer-selected-window) (selected-window)))
             pane-bufs target-window sibling-window)
         (maphash (lambda (_pid buf) (push buf pane-bufs))
                  ghostel-tmux--panes)
@@ -1117,26 +1165,24 @@ the selected window is one of the tile's, and the tile's size reported."
         (when sibling-window
           (setq target-window sibling-window))
         (when (and switch
-                   (memq (window-buffer (selected-window)) pane-bufs)
-                   (not (eq (window-buffer (selected-window)) new-buf)))
-          (setq target-window (selected-window)))
+                   (memq (window-buffer selected) pane-bufs)
+                   (not (eq (window-buffer selected) new-buf)))
+          (setq target-window selected))
         (when (window-live-p ghostel-tmux--auto-host-window)
           (setq target-window ghostel-tmux--auto-host-window))
         (setq ghostel-tmux--auto-host-window nil)
         (when (and target-window
                    (not (get-buffer-window new-buf 'visible)))
-          (ghostel-tmux--display-pane-in-window new-buf target-window)))))))
-
-(defvar-local ghostel-tmux--held-pane nil
-  "Pane id of a report of tmux held back while the minibuffer was selected.
-See `ghostel-tmux--select-tile-window'.")
+          (if (ghostel-tmux--hold #'ghostel-tmux--follow-held switch)
+              (setq ghostel-tmux--auto-host-window target-window)
+            (ghostel-tmux--display-pane-in-window new-buf target-window))))))))
 
 (defun ghostel-tmux--select-tile-window (windows pid)
   "Select the window of pane PID among the tile WINDOWS, which shows it.
 Only when the selected window is one of them: a report from tmux must
 not take the selection from another window or the minibuffer.  With the
-minibuffer selected, PID is kept for when it is left, see
-`ghostel-tmux--selection-change'.  Runs in the controller."
+minibuffer selected, the pane tmux has active then is followed when it
+has closed, see `ghostel-tmux--hold'.  Runs in the controller."
   (when-let* ((buf (gethash pid ghostel-tmux--panes))
               (window (cl-find-if (lambda (w)
                                     (and (eql (ghostel-tmux--tile-pid w) pid)
@@ -1148,7 +1194,7 @@ minibuffer selected, PID is kept for when it is left, see
         (save-current-buffer
           (select-window window))))
      ((window-minibuffer-p (selected-window))
-      (setq ghostel-tmux--held-pane pid)))))
+      (ghostel-tmux--hold #'ghostel-tmux--follow-held nil)))))
 
 (defun ghostel-tmux--selection-pending-p (pid)
   "Non-nil when a `select-pane' of a pane other than PID awaits its reply.
@@ -1278,12 +1324,13 @@ FLAGS are the window's flags, nil when not known."
         ;; Show tmux's active pane in the window kept for it.
         (when (and (window-live-p ghostel-tmux--auto-host-window)
                    (eql wid ghostel-tmux--current-window-id))
-          (let ((pane (gethash shown ghostel-tmux--panes))
-                (target-window ghostel-tmux--auto-host-window))
-            (setq ghostel-tmux--auto-host-window nil
-                  ghostel-tmux--active-pane-id shown)
-            (when (buffer-live-p pane)
-              (ghostel-tmux--display-pane-in-window pane target-window))))
+          (setq ghostel-tmux--active-pane-id shown)
+          (unless (ghostel-tmux--hold #'ghostel-tmux--follow-held nil)
+            (let ((pane (gethash shown ghostel-tmux--panes))
+                  (target-window ghostel-tmux--auto-host-window))
+              (setq ghostel-tmux--auto-host-window nil)
+              (when (buffer-live-p pane)
+                (ghostel-tmux--display-pane-in-window pane target-window)))))
         ;; Deferred follow: `%session-window-changed' fired for this WID
         ;; before its panes were there (typical for new-window — the
         ;; session-window-changed arrives before window-add + list-windows
@@ -1382,12 +1429,31 @@ the buffer it showed then.  Later changes arrive as notifications."
       (ghostel-tmux--on-layout-change wid layout visible))
     (when (and active-pane (null ghostel-tmux--active-pane-id))
       (setq ghostel-tmux--active-pane-id active-pane))
-    (when (and seed ghostel-tmux--auto-host-buffer)
-      (unless (and (window-live-p kept)
-                   (eq (window-buffer kept) ghostel-tmux--auto-host-buffer))
-        (setq kept nil))
-      (setq ghostel-tmux--auto-host-buffer nil)
-      (message "Ghostel-tmux: Attached to %s" ghostel-tmux--session-name))
+    (when seed
+      (when ghostel-tmux--auto-host-buffer
+        (message "Ghostel-tmux: Attached to %s" ghostel-tmux--session-name))
+      (ghostel-tmux--fill-kept-window kept))
+    ;; All of the session's windows, in tmux's order; a window linked
+    ;; twice has two rows.
+    (when rows
+      (setq ghostel-tmux--window-order (delete-dups (mapcar #'car rows))))
+    (when (assq ghostel-tmux--current-window-id rows)
+      (ghostel-tmux--leave-floating-window))))
+
+(defun ghostel-tmux--fill-kept-window (kept)
+  "Show a pane in KEPT, the window kept for the rows of the session.
+The window of an attach must still show `ghostel-tmux--auto-host-buffer'.
+A pane of this controller that KEPT shows stays, and tmux switches to
+it; any other buffer makes way for tmux's active pane.  Without a pane
+to show, KEPT is `ghostel-tmux--auto-host-window' again.  Waits for the
+minibuffer to close, see `ghostel-tmux--hold'."
+  (unless (and (or kept ghostel-tmux--auto-host-buffer)
+               (ghostel-tmux--hold #'ghostel-tmux--fill-kept-window kept))
+    (when (and ghostel-tmux--auto-host-buffer
+               (not (and (window-live-p kept)
+                         (eq (window-buffer kept) ghostel-tmux--auto-host-buffer))))
+      (setq kept nil))
+    (setq ghostel-tmux--auto-host-buffer nil)
     (when (window-live-p kept)
       (let* ((shown (window-buffer kept))
              (pane (if (eq (buffer-local-value 'ghostel-tmux--controller-buffer
@@ -1397,13 +1463,7 @@ the buffer it showed then.  Later changes arrive as notifications."
                      (ghostel-tmux--attach-pane))))
         (if pane
             (ghostel-tmux--display-pane-in-window pane kept)
-          (setq ghostel-tmux--auto-host-window kept))))
-    ;; All of the session's windows, in tmux's order; a window linked
-    ;; twice has two rows.
-    (when rows
-      (setq ghostel-tmux--window-order (delete-dups (mapcar #'car rows))))
-    (when (assq ghostel-tmux--current-window-id rows)
-      (ghostel-tmux--leave-floating-window))))
+          (setq ghostel-tmux--auto-host-window kept))))))
 
 (defun ghostel-tmux--floating-only-p ()
   "Return non-nil when the session's current window has no tiled pane."
@@ -1419,8 +1479,10 @@ to the first window with a tiled pane: `--on-session-window-changed' then
 fills the kept window with that window's own active pane, and the rows
 start over when that window is gone.  Without any tiled pane, the kept
 window waits as long as it holds the hidden host of a takeover; another
-buffer there is the user's."
-  (when (and (window-live-p ghostel-tmux--auto-host-window)
+buffer there is the user's.  Waits for the minibuffer to close, as the
+window is kept after that, see `ghostel-tmux--fill-kept-window'."
+  (when (and (not (ghostel-tmux--hold #'ghostel-tmux--leave-floating-window))
+             (window-live-p ghostel-tmux--auto-host-window)
              (ghostel-tmux--floating-only-p))
     (let ((wid (cl-find-if
                 (lambda (wid)
@@ -2629,13 +2691,15 @@ failure TRIES times."
 Runs in the controller.  A tile of another shape is built again in its
 space, kept for a lost pane in `ghostel-tmux--auto-host-window' when it
 is part of it.  Without a tile, a window showing a pane of a WID of
-several panes gets one."
+several panes gets one.  Waits for the minibuffer to close, see
+`ghostel-tmux--hold'."
   (let* ((controller (current-buffer))
          (entry (gethash wid ghostel-tmux--windows))
          (tree (plist-get entry :tree))
          (windows (ghostel-tmux--tile-windows controller wid))
          (keep (car (memq ghostel-tmux--auto-host-window windows))))
     (cond
+     ((ghostel-tmux--hold #'ghostel-tmux--tile-update wid))
      ((null tree)
       (when windows
         (ghostel-tmux--tile-collapse windows keep)))
@@ -2754,26 +2818,22 @@ minibuffer is active do not count.  Return the size sent, or nil."
   "Ask tmux for the pane of the selected window, when it is of a tile.
 The window must be FRAME's and show its own pane; the tile's size goes
 with it, as its tmux window becomes the current one.  Coming back from
-the minibuffer to the tile of a report held back meanwhile, the window
-of that pane, still tmux's active one, is selected instead."
-  (let ((window (selected-window)))
+a minibuffer that closed selects nothing while calls of the controller
+are held back, see `ghostel-tmux--hold': they show what tmux has."
+  (let ((window (selected-window))
+        (old (frame-old-selected-window frame)))
     (when-let* ((tile (and (eq (window-frame window) frame)
                            (ghostel-tmux--tile-leaf window))))
       (with-current-buffer (nth 0 tile)
-        (let ((held (and (window-live-p (frame-old-selected-window frame))
-                         (window-minibuffer-p (frame-old-selected-window frame))
-                         ghostel-tmux--held-pane)))
-          (setq ghostel-tmux--held-pane nil)
-          (when (and ghostel-tmux--panes
-                     (eq (window-buffer window) (gethash (nth 2 tile) ghostel-tmux--panes))
-                     (ghostel-tmux--controller-live-p))
-            (if (and held
-                     (eql held ghostel-tmux--active-pane-id)
-                     (eql (nth 1 tile) ghostel-tmux--current-window-id))
-                (ghostel-tmux--select-tile-window
-                 (ghostel-tmux--tile-windows (current-buffer) (nth 1 tile)) held)
-              (ghostel-tmux--select-pane (nth 1 tile) (nth 2 tile))
-              (ghostel-tmux--tile-sync-size (nth 1 tile)))))))))
+        (when (and ghostel-tmux--panes
+                   (eq (window-buffer window) (gethash (nth 2 tile) ghostel-tmux--panes))
+                   (ghostel-tmux--controller-live-p)
+                   (not (and (assq (current-buffer) ghostel-tmux--held-calls)
+                             (window-live-p old)
+                             (window-minibuffer-p old)
+                             (not (active-minibuffer-window)))))
+          (ghostel-tmux--select-pane (nth 1 tile) (nth 2 tile))
+          (ghostel-tmux--tile-sync-size (nth 1 tile)))))))
 
 (defun ghostel-tmux--window-change (_frame)
   "Check the tiles after a change of windows, when there may be one."
@@ -2811,7 +2871,8 @@ A tile waiting for its layout, see `--settle-layout', is left alone but
 for its panes moved between its windows, which move in tmux too, see
 `--tile-swap'.  A window of the tile resized in Emacs while the tile
 kept its size in pixels, as by dragging a divider, resizes its pane,
-see `--tile-resize'."
+see `--tile-resize'.  A tile that is not as its layout says waits for
+the minibuffer to close, see `ghostel-tmux--hold'."
   (let* ((entry (gethash wid ghostel-tmux--windows))
          (tree (plist-get entry :tree))
          (settling (plist-get entry :settling)))
@@ -2819,6 +2880,9 @@ see `--tile-resize'."
                (memq (selected-window) windows))
       (ghostel-tmux--select-pane wid (ghostel-tmux--tile-pid (selected-window))))
     (cond
+     ((and (or (null tree)
+               (not (or settling (ghostel-tmux--tile-intact-p wid windows))))
+           (ghostel-tmux--hold #'ghostel-tmux--schedule-tile-check)))
      ((null tree)
       (dolist (window windows)
         (ghostel-tmux--leave-tile window)))
@@ -3176,6 +3240,8 @@ frame's data and exit."
   (when (eq ghostel-control-mode-function #'ghostel-tmux--control)
     (setq ghostel-control-mode-function nil))
   (ghostel-tmux--remove-tile-hooks)
+  (remove-hook 'minibuffer-exit-hook #'ghostel-tmux--schedule-held-calls)
+  (cancel-function-timers #'ghostel-tmux--run-held-calls)
   (dolist (timer (list ghostel-tmux--tile-timer ghostel-tmux--resize-timer))
     (when (timerp timer)
       (cancel-timer timer)))
@@ -3228,9 +3294,10 @@ a reply while tmux stays attached: an empty line makes it leave."
         ghostel-tmux--pending-follow-wid nil
         ghostel-tmux--active-pane-id nil
         ghostel-tmux--client-size nil
-        ghostel-tmux--held-pane nil
         ghostel-tmux--server-key nil
-        ghostel-tmux--detaching nil))
+        ghostel-tmux--detaching nil
+        ghostel-tmux--held-calls (assq-delete-all (current-buffer)
+                                                  ghostel-tmux--held-calls)))
 
 (defun ghostel-tmux--enter-control-mode (buf)
   "Take over BUF (a ghostel buffer) as a tmux controller.
@@ -3474,6 +3541,14 @@ it shows the same buffer.  Returns the controller buffer."
                              (selected-window)))
                 (with-current-buffer buf
                   (setq ghostel-tmux--auto-host-window nil))))
+            (let ((fill (list #'ghostel-tmux--fill-kept-window (selected-window))))
+              (dolist (call ghostel-tmux--held-calls)
+                (when (and (equal (cdr call) fill) (buffer-live-p (car call)))
+                  (with-current-buffer (car call)
+                    (setq ghostel-tmux--auto-host-buffer nil))))
+              (setq ghostel-tmux--held-calls
+                    (cl-remove fill ghostel-tmux--held-calls
+                               :key #'cdr :test #'equal)))
             (setq ghostel-tmux--controller-process proc
                   ghostel-tmux--session-name session
                   ghostel-tmux--auto-host-window (selected-window)
@@ -3538,16 +3613,20 @@ split leaves half a pane in a full-height Emacs window."
                 (ghostel-tmux--select-pane window-id pane-id))))))))))
 
 (defun ghostel-tmux--replace-tile (pane-buf window)
-  "Collapse the tile WINDOW is part of into it, to show PANE-BUF there."
+  "Collapse the tile WINDOW is part of into it, to show PANE-BUF there.
+Waits for the minibuffer to close, see `ghostel-tmux--hold'."
   (when-let* ((tile (and (eq (window-buffer window) pane-buf)
                          (ghostel-tmux--tile-leaf window))))
-    (ghostel-tmux--tile-collapse
-     (ghostel-tmux--tile-windows (nth 0 tile) (nth 1 tile)) window)
-    (ghostel-tmux--apply-pane-size pane-buf window)))
+    (unless (with-current-buffer (nth 0 tile)
+              (ghostel-tmux--hold #'ghostel-tmux--replace-tile pane-buf window))
+      (ghostel-tmux--tile-collapse
+       (ghostel-tmux--tile-windows (nth 0 tile) (nth 1 tile)) window)
+      (ghostel-tmux--apply-pane-size pane-buf window))))
 
 (defun ghostel-tmux--show-tile (pane-buf window)
   "Build a tile in WINDOW for the tmux window of PANE-BUF, which it shows.
-tmux is asked to switch to the pane first, which the tile then selects."
+tmux is asked to switch to the pane first, which the tile then selects.
+Waits for the minibuffer to close, see `ghostel-tmux--hold'."
   (ghostel-tmux--recover-members)
   (when (and (window-live-p window)
              (eq (window-buffer window) pane-buf)
@@ -3557,7 +3636,9 @@ tmux is asked to switch to the pane first, which the tile then selects."
           (controller (buffer-local-value 'ghostel-tmux--controller-buffer pane-buf)))
       (when (buffer-live-p controller)
         (with-current-buffer controller
-          (unless (ghostel-tmux--tile-windows controller window-id)
+          (unless (or (ghostel-tmux--tile-windows controller window-id)
+                      (ghostel-tmux--hold #'ghostel-tmux--show-tile
+                                          pane-buf window))
             (when (ghostel-tmux--controller-live-p)
               (ghostel-tmux--select-pane window-id pane-id))
             (ghostel-tmux--tile-build window-id window)
