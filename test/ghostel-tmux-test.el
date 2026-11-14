@@ -6205,6 +6205,33 @@ BODY starts with no held calls and its own `minibuffer-exit-hook'."
       (should (equal ghostel-tmux--held-calls
                      `((,ctl ghostel-tmux--schedule-tile-check)))))))
 
+(ert-deftest ghostel-tmux-test-host-shown-again-after-the-minibuffer ()
+  "A window Emacs gives its sealed pane back shows the host once more."
+  (let ((host (generate-new-buffer "*xcm-host*"))
+        (pane (generate-new-buffer "*xcm-pane*"))
+        (ghostel-tmux-keep-detached-panes t))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (set-window-buffer (selected-window) pane)
+          (with-current-buffer pane
+            (ghostel-tmux-pane-mode 1))
+          (ghostel-tmux-test--with-minibuffer open
+            (with-current-buffer host
+              (setq ghostel-tmux--panes (make-hash-table)
+                    ghostel-tmux--windows (make-hash-table))
+              (puthash 0 pane ghostel-tmux--panes)
+              (ghostel-tmux--exit-control-mode host))
+            (should (eq (window-buffer) host))
+            ;; As Emacs does when the minibuffer closes.
+            (set-window-buffer (selected-window) pane)
+            (setq open nil)
+            (ghostel-tmux--run-held-calls)
+            (should (eq (window-buffer) host))
+            (should-not ghostel-tmux--held-calls)))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (when (buffer-live-p host) (kill-buffer host)))))
+
 (ert-deftest ghostel-tmux-test-reset-drops-the-calls-held-back ()
   "A reset drops the calls held back for its controller only."
   (ghostel-tmux-test--with-controller ctl

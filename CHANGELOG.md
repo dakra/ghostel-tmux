@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- A pane that arrives while a minibuffer is open, as after
+  `ghostel-tmux-attach`, keeps its window when the minibuffer closes.
+  A split, a switch to another pane or tmux window, and a pane or tmux
+  window that ended, all reported by tmux meanwhile, are shown once it
+  has closed.
+- A takeover whose tmux leaves while a minibuffer is open shows the
+  shell again once it has closed.
+
 ## [0.3.0] — 2026-11-14
 
 ### Added

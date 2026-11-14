@@ -560,9 +560,8 @@ that session."
 
 (defun ghostel-tmux--keep-panes-p (alive)
   "Return non-nil when the panes of a session that left stay as snapshots.
-ALIVE is non-nil when the session goes on in tmux, `keep' when it was
-detached with KEEP, see `ghostel-tmux-detach'.  See
-`ghostel-tmux-keep-detached-panes'."
+ALIVE is non-nil when the session goes on in tmux, `keep' when it was detached
+with KEEP, see `ghostel-tmux-detach'.  See `ghostel-tmux-keep-detached-panes'."
   (cond
    ((eq alive 'keep))
    ((eq ghostel-tmux-keep-detached-panes 'ended) (not alive))
@@ -570,8 +569,8 @@ detached with KEEP, see `ghostel-tmux-detach'.  See
 
 (defun ghostel-tmux--controller-panes (controller)
   "Return the pane buffers of CONTROLLER.
-CONTROLLER may already be a killed buffer; its pane table is gone
-then, so panes are found by scanning `buffer-list' for pane buffers
+CONTROLLER may already be a killed buffer; its pane table is gone then,
+so panes are found by scanning `buffer-list' for pane buffers
 whose back-pointer matches."
   (if (buffer-live-p controller)
       (with-current-buffer controller
@@ -1016,9 +1015,8 @@ SEED is passed on to `ghostel-tmux--receive-window-rows'."
 
 (defun ghostel-tmux--on-window-close (wid)
   "Handle `%window-close @WID': drop the window if the session lost it.
-tmux also sends this when another session, such as a grouped one, lets
-go of a window this session keeps, so ask.  A session that ends sends
-`%exit' instead."
+tmux also sends this when another session, such as a grouped one, lets go of a
+window this session keeps, so ask.  A session that ends sends `%exit' instead."
   (when (gethash wid ghostel-tmux--windows)
     (ghostel-tmux--queue-command
      "list-windows -F \"#{window_id}\""
@@ -1078,9 +1076,8 @@ Each is (CONTROLLER FUNCTION . ARGS), see `ghostel-tmux--hold'.")
   "Keep the call of FUNCTION with ARGS for later while a minibuffer is open.
 Return non-nil when it is kept.  Emacs shows the windows as they were
 before a minibuffer again when it closes, which would undo what tmux
-asked for meanwhile.  The call is made in this controller once no
-minibuffer is open, after the calls kept before it; one kept twice is
-made once."
+asked for meanwhile.  The call is made in this controller once no minibuffer
+is open, after the calls kept before it; one kept twice is made once."
   (when (active-minibuffer-window)
     (let ((call `(,(current-buffer) ,function ,@args)))
       (setq ghostel-tmux--held-calls
@@ -1354,9 +1351,8 @@ FLAGS are the window's flags, nil when not known."
 
 (defun ghostel-tmux--rezoom-shown-pane (wid flags)
   "Zoom the pane shown of window WID again, unless FLAGS say it is zoomed.
-Only without `ghostel-tmux-split-windows'.  tmux unzooms a window when
-a pane joins or leaves it, while the pane shown keeps the size of its
-Emacs window."
+Only without `ghostel-tmux-split-windows'.  tmux unzooms a window when a pane
+joins or leaves it, while the pane shown keeps the size of its Emacs window."
   (let* ((pid ghostel-tmux--active-pane-id)
          (buf (and pid (gethash pid ghostel-tmux--panes))))
     (when (and (not ghostel-tmux-split-windows)
@@ -1590,8 +1586,8 @@ The engine does not synthesize CR, so they are fed as CRLF."
 LINES end with a screen of HEIGHT rows whose cursor is at column X, row
 Y.  The cursor moves from the last row fed: a terminal of another height
 shows the rows at another offset from its top.  A lower terminal loses
-blank rows below the cursor first, as tmux does when it shrinks the
-pane.  A capture ends without resetting its colors."
+blank rows below the cursor first, as tmux does when it shrinks the pane.
+A capture ends without resetting its colors."
   (let* ((below (- height y 1))
          (blank (or (cl-position-if-not #'string-blank-p (reverse lines))
                     (length lines)))
@@ -2036,9 +2032,8 @@ The visible switch happens reactively in `--on-session-window-changed'."
 
 (defun ghostel-tmux--prefix-self-insert ()
   "Send the tmux prefix key itself to the underlying program.
-Bound as `<prefix> <prefix>', matching tmux's convention.  Only
-meaningful when `ghostel-tmux-prefix-key' resolves to a single control
-byte (`C-<letter>')."
+Bound as `<prefix> <prefix>', matching tmux's convention.  Only meaningful when
+`ghostel-tmux-prefix-key' resolves to a single control byte (`C-<letter>')."
   (interactive)
   (let* ((seq (kbd ghostel-tmux-prefix-key))
          (byte (and (= (length seq) 1)
@@ -2690,9 +2685,8 @@ failure TRIES times."
   "Show tmux window WID as its layout says, in its tile or a window of it.
 Runs in the controller.  A tile of another shape is built again in its
 space, kept for a lost pane in `ghostel-tmux--auto-host-window' when it
-is part of it.  Without a tile, a window showing a pane of a WID of
-several panes gets one.  Waits for the minibuffer to close, see
-`ghostel-tmux--hold'."
+is part of it.  Without a tile, a window showing a pane of a WID of several
+panes gets one.  Waits for the minibuffer to close, see `ghostel-tmux--hold'."
   (let* ((controller (current-buffer))
          (entry (gethash wid ghostel-tmux--windows))
          (tree (plist-get entry :tree))
@@ -2937,9 +2931,8 @@ the minibuffer to close, see `ghostel-tmux--hold'."
 
 (defun ghostel-tmux--edge-pane (node horizontal)
   "Return a pane of layout NODE whose resize moves the edge of NODE, or nil.
-tmux resizes the nearest part of a split side by side, with HORIZONTAL,
-or stacked above the pane: that of NODE, with only splits the other way
-in between."
+tmux resizes the nearest part of a split side by side, with HORIZONTAL, or
+stacked above the pane: that of NODE, with only splits the other way in between"
   (cond
    ((eq (car node) 'pane) (nth 5 node))
    ((eq (car node) (if horizontal 'v 'h))
@@ -3042,8 +3035,8 @@ tmux refuses fits the windows to tmux's sizes."
 
 (defun ghostel-tmux--tile-dissolve (controller &optional collapse)
   "Let the windows of CONTROLLER's tiles go.
-With COLLAPSE, those showing a pane collapse to one.  Return the
-windows that remain of them."
+With COLLAPSE, those showing a pane collapse to one.
+Return the windows that remain of them."
   (let (kept)
     (pcase-dolist (`((,owner . ,_wid) . ,windows) (ghostel-tmux--tiles))
       (when (eq owner controller)
@@ -3330,11 +3323,23 @@ are created as the parser sees notifications.  The host is hidden, see
     (message "Ghostel-tmux: Entered control mode (buffer %s)"
              (buffer-name buf))))
 
+(defun ghostel-tmux--show-host (pane-buffers)
+  "Show this buffer, a host, in the windows showing one of PANE-BUFFERS."
+  (let ((host (current-buffer)))
+    (walk-windows
+     (lambda (window)
+       (when (memq (window-buffer window) pane-buffers)
+         (with-selected-window window
+           (switch-to-buffer host))))
+     'no-minibuffer 'visible)))
+
 (defun ghostel-tmux--exit-control-mode (buf)
   "Restore BUF to normal ghostel operation after tmux exited control mode.
 Any windows showing pane buffers are returned to the host buffer so the
 user lands back at the shell, and the pane buffers are sealed as
-read-only snapshots or killed, see `ghostel-tmux-keep-detached-panes'."
+read-only snapshots or killed, see `ghostel-tmux-keep-detached-panes'.
+Windows that show sealed panes again when a minibuffer has closed are
+returned once more, see `ghostel-tmux--hold'."
   (with-current-buffer buf
     (ghostel-tmux--tile-dissolve buf t)
     (let (pane-buffers)
@@ -3344,17 +3349,11 @@ read-only snapshots or killed, see `ghostel-tmux-keep-detached-panes'."
                      (push pane-buf pane-buffers)
                      (ghostel-tmux--seal-pane-buffer pane-buf)))
                  ghostel-tmux--panes))
-      ;; Any window currently showing one of our pane buffers should
-      ;; switch back to the host so the user sees the shell prompt again.
-      (walk-windows
-       (lambda (window)
-         (when (memq (window-buffer window) pane-buffers)
-           (with-selected-window window
-             (switch-to-buffer buf))))
-       'no-minibuffer 'visible)
+      (ghostel-tmux--show-host pane-buffers)
       (unless (ghostel-tmux--keep-panes-p ghostel-tmux--detaching)
-        (mapc #'kill-buffer pane-buffers)))
-    (ghostel-tmux--reset-session-state)
+        (mapc #'kill-buffer pane-buffers))
+      (ghostel-tmux--reset-session-state)
+      (ghostel-tmux--hold #'ghostel-tmux--show-host pane-buffers))
     (setq ghostel-tmux--controller-process nil
           ghostel-tmux--parser-state 'preamble
           ghostel-tmux--panes nil
@@ -4029,9 +4028,8 @@ shows a pane of WID; the windows of the tile showing a pane are deleted then."
   "Capture TARGET pane (e.g. \"session:window.pane\") into a fresh ghostel buffer.
 The buffer renders the captured bytes through a VT engine but is not
 connected to a live tmux session.  In a pane buffer of a live session,
-the session's tmux captures it.  Otherwise a non-nil SOCKET is used
-instead of `ghostel-tmux-socket'; interactively, a prefix argument
-prompts for it."
+the session's tmux captures it.  Otherwise a non-nil SOCKET is used instead
+of `ghostel-tmux-socket'; interactively, a prefix argument prompts for it."
   (interactive
    (let ((socket (ghostel-tmux--read-socket)))
      (list (read-string "tmux target (e.g. mysession:0.0 or %3): "
