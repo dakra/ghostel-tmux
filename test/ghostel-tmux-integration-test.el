@@ -39,7 +39,7 @@ while IFS= read -r line; do
   i=$((i+1))
   case \"$line\" in
     *alternate_on*)
-      printf '%%begin %d %d 1\\n0,0,0,16,1,1,1,0,0,0,1,0,0,0,0,0,0,1,2\\n%%end %d %d 1\\n' $i $i $i $i ;;
+      printf '%%begin %d %d 1\\n0,0,0,16,1,1,1,0,0,0,1,0,0,0,0,0,0,1,2,0,0\\n%%end %d %d 1\\n' $i $i $i $i ;;
     list-windows*)
       printf '%%begin %d %d 1\\n@0\\t%%0\\t1\\tmain\\tbd5b,80x24,0,0,0\\tbd5b,80x24,0,0,0\\n%%end %d %d 1\\n' $i $i $i $i ;;
     capture-pane*)
@@ -268,6 +268,52 @@ SPEC is (BUFFER TERM)."
       (when (buffer-live-p pane) (kill-buffer pane))
       (kill-buffer ctl)
       (kill-buffer old))))
+
+(ert-deftest ghostel-tmux-integration-local-pane-reads-tty ()
+  "A local pane's tty is read for password prompts until the pane is sealed.
+Emacs runs both the tmux client and the pane's shell here."
+  :tags '(native)
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((ctl (generate-new-buffer " *ghostel-tmux-int-ctl*"))
+         (client (make-process :name "ghostel-tmux-int-client" :buffer nil
+                               :command '("sleep" "5") :connection-type 'pipe
+                               :noquery t))
+         (output "")
+         (shell (make-process
+                 :name "ghostel-tmux-int-shell" :buffer nil
+                 :connection-type 'pty :noquery t
+                 :command '("/bin/sh" "-c" "stty -echo; printf READY; sleep 5")
+                 :filter (lambda (_proc string)
+                           (setq output (concat output string)))))
+         (state (mapconcat
+                 (lambda (field)
+                   (pcase field
+                     ('client_pid (number-to-string (process-id client)))
+                     ('pane_pid (number-to-string (process-id shell)))
+                     (_ "0")))
+                 ghostel-tmux--pane-state-fields ","))
+         (deadline (+ (float-time) 5))
+         pane)
+    (unwind-protect
+        (progn
+          (while (and (not (string-search "READY" output))
+                      (< (float-time) deadline))
+            (accept-process-output shell 0.1))
+          (with-current-buffer ctl
+            (ghostel-tmux-control-mode)
+            (setq ghostel-tmux--controller-process client))
+          (setq pane (ghostel-tmux--get-or-create-pane ctl 1 0 "w"))
+          (with-current-buffer pane
+            (setq-local ghostel-detect-password-prompts nil))
+          (ghostel-tmux--receive-pane-backfill ctl 1 state nil nil nil)
+          (with-current-buffer pane
+            (should (eq 'tty (ghostel--password-prompt-detected-p)))
+            (ghostel-tmux--seal-pane-buffer pane)
+            (should-not (ghostel--password-prompt-detected-p))))
+      (when (buffer-live-p pane) (kill-buffer pane))
+      (kill-buffer ctl)
+      (delete-process client)
+      (delete-process shell))))
 
 (ert-deftest ghostel-tmux-integration-pane-output-sends-no-replies ()
   "A query in a pane's `%output' gets no reply from its terminal; tmux answers."

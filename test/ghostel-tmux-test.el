@@ -1923,6 +1923,100 @@ tmux resizes that screen when the pane leaves the alternate one."
         (ghostel-tmux--pump-deferred ctl)
         (should (equal (car sent) "behind\n"))))))
 
+(defmacro ghostel-tmux-test--with-password-pids (set &rest body)
+  "Run BODY with SET collecting what `ghostel-set-password-pid' gets.
+Each entry is (BUFFER . PID).  The controller's tmux client has pid 100."
+  (declare (indent 1))
+  `(let ((,set nil))
+     (cl-letf (((symbol-function 'ghostel-set-password-pid)
+                (lambda (pid) (push (cons (current-buffer) pid) ,set)))
+               ((symbol-function 'process-id) (lambda (_proc) 100)))
+       ,@body)))
+
+(defun ghostel-tmux-test--answer-bootstrap (ctl state)
+  "Answer a pane's bootstrap on CTL with STATE, or an error, and no captures."
+  (ghostel-tmux-test--feed
+   ctl (concat (if state
+                   (format "%%begin 1 1 1\r\n%s\r\n%%end 1 1 1\r\n" state)
+                 "%begin 1 1 1\r\n%error 1 1 1\r\n")
+               (apply #'concat
+                      (make-list 3 "%begin 1 2 1\r\n%error 1 2 1\r\n")))))
+
+(ert-deftest ghostel-tmux-test-password-pid-of-local-pane ()
+  "A pane whose tmux client is the controller's has its tty read."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil) (pane (generate-new-buffer " pane")))
+      (unwind-protect
+          (ghostel-tmux-test--with-password-pids set
+            (ghostel-tmux-test--with-wire ctl sent
+              (puthash 5 pane ghostel-tmux--panes)
+              ;; The pane's shell may report a directory on another host.
+              (with-current-buffer pane
+                (setq default-directory "/ssh:studio:/"))
+              (ghostel-tmux--bootstrap-pane ctl 5)
+              (should (string-search "#{client_pid},#{pane_pid}" (car sent)))
+              (ghostel-tmux-test--answer-bootstrap
+               ctl (ghostel-tmux-test--pane-state 'client_pid "100"
+                                                  'pane_pid "1")))
+            (should (equal `((,pane . 1)) set)))
+        (kill-buffer pane)))))
+
+(ert-deftest ghostel-tmux-test-password-pid-not-set ()
+  "No pid is set unless the controller's local subprocess is tmux's client.
+A later answer clears the pid an earlier one set."
+  (pcase-dolist (`(,dir ,proc ,client ,pid)
+                 '(;; tmux on another host can report a local pid.
+                   ("/ssh:studio:/" fake-proc "100" "1")
+                   ;; Another client, as of tmux behind ssh.
+                   (nil fake-proc "99" "1")
+                   ;; A takeover, whose `tmux -CC' can exit and leave a shell.
+                   (nil nil "100" "1")
+                   ;; A dead pane.
+                   (nil fake-proc "100" "")
+                   ;; A failed query.
+                   (nil fake-proc nil nil)))
+    (ghostel-tmux-test--with-controller ctl
+      (let ((sent nil) (pane (generate-new-buffer " pane")))
+        (unwind-protect
+            (ghostel-tmux-test--with-password-pids set
+              (ghostel-tmux-test--with-wire ctl sent
+                (puthash 5 pane ghostel-tmux--panes)
+                (ghostel-tmux--bootstrap-pane ctl 5)
+                (ghostel-tmux-test--answer-bootstrap
+                 ctl (ghostel-tmux-test--pane-state 'client_pid "100"
+                                                    'pane_pid "1"))
+                (ghostel-tmux--bootstrap-pane ctl 5)
+                (setq default-directory (or dir default-directory)
+                      ghostel-tmux--controller-process proc)
+                (ghostel-tmux-test--answer-bootstrap
+                 ctl (and client (ghostel-tmux-test--pane-state
+                                  'client_pid client 'pane_pid pid))))
+              (should (equal `((,pane) (,pane . 1)) set)))
+          (kill-buffer pane))))))
+
+(ert-deftest ghostel-tmux-test-password-pid-of-killed-pane ()
+  "The pid goes to the pane's buffer when the answer arrives, if any."
+  (ghostel-tmux-test--with-controller ctl
+    (let ((sent nil)
+          (state (ghostel-tmux-test--pane-state 'client_pid "100"
+                                                'pane_pid "1"))
+          (pane (generate-new-buffer " pane"))
+          (next (generate-new-buffer " next")))
+      (unwind-protect
+          (ghostel-tmux-test--with-password-pids set
+            (ghostel-tmux-test--with-wire ctl sent
+              (puthash 5 pane ghostel-tmux--panes)
+              (ghostel-tmux--bootstrap-pane ctl 5)
+              (kill-buffer pane)
+              (ghostel-tmux-test--answer-bootstrap ctl state)
+              (should-not set)
+              ;; The pane has another buffer by then.
+              (ghostel-tmux--bootstrap-pane ctl 5)
+              (puthash 5 next ghostel-tmux--panes)
+              (ghostel-tmux-test--answer-bootstrap ctl state))
+            (should (equal `((,next . 1)) set)))
+        (kill-buffer next)))))
+
 (ert-deftest ghostel-tmux-test-bootstrap-queued-once-per-pane ()
   ;; A second %layout-change arriving before the first capture-pane
   ;; replies must not queue a duplicate backfill pair.

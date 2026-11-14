@@ -1441,8 +1441,8 @@ buffer there is the user's."
     cursor_flag wrap_flag insert_flag keypad_cursor_flag keypad_flag
     bracket_paste_flag mouse_standard_flag mouse_button_flag mouse_all_flag
     mouse_sgr_flag mouse_utf8_flag scroll_region_upper scroll_region_lower
-    pane_height)
-  "The tmux formats that describe a pane's terminal beyond its text.")
+    pane_height client_pid pane_pid)
+  "The tmux formats that describe a pane beyond its text.")
 
 (defconst ghostel-tmux--pane-mode-sequences
   '((insert_flag . "\e[4h")
@@ -1576,20 +1576,37 @@ cursor lands after the last content line."
                                                        rows screen)
   "Recreate PANE-ID's terminal under CONTROLLER from tmux's replies.
 STATE, PRIMARY, ROWS and SCREEN are the replies `--bootstrap-pane' asked
-for, each nil for a failed command."
+for, each nil for a failed command.  The tty of a dedicated controller's
+pane on this machine is read for password prompts."
   (let ((buf (with-current-buffer controller
-               (gethash pane-id ghostel-tmux--panes))))
+               (gethash pane-id ghostel-tmux--panes)))
+        (state (ghostel-tmux--parse-pane-state state)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         ;; A pane killed while its backfill was queued gets a second one.
         (when (and rows (not ghostel-tmux--initialized))
           (ghostel-write-output
            (ghostel-tmux--backfill-data
-            (ghostel-tmux--parse-pane-state state) primary rows
-            screen (cdr (ghostel-terminal-size)))
+            state primary rows screen (cdr (ghostel-terminal-size)))
            t))
         (setq ghostel-tmux--initialized t
-              ghostel-tmux--bootstrap-pending nil)))))
+              ghostel-tmux--bootstrap-pending nil)
+        (ghostel-set-password-pid
+         (ghostel-tmux--local-pane-pid controller state))))))
+
+(defun ghostel-tmux--local-pane-pid (controller state)
+  "Return the pid in STATE of a pane of CONTROLLER on this machine, or nil.
+STATE is from `ghostel-tmux--parse-pane-state'.  The pane is on this machine
+when tmux's client is CONTROLLER's local subprocess.  A takeover has none:
+once its `tmux -CC' exits, what it sends reaches the shell it ran in."
+  (with-current-buffer controller
+    (when-let* ((proc ghostel-tmux--controller-process)
+                ((not (file-remote-p default-directory)))
+                ((equal (number-to-string (process-id proc))
+                        (alist-get 'client_pid state)))
+                (pid (string-to-number (alist-get 'pane_pid state)))
+                ((> pid 0)))
+      pid)))
 
 (defun ghostel-tmux--wipe-panes ()
   "Drop all pane buffers and reset window state."

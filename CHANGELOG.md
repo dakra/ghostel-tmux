@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- A password prompt in a pane is read with `read-passwd`, as in a
+  ghostel buffer, when `ghostel-tmux-attach` or `ghostel-tmux-new` runs
+  tmux on this machine.  A pane started again with `respawn-pane` gets
+  this back when the session is attached again.
+
 ### Fixed
 - An Emacs input method such as `chinese-py` composes in a pane.
 - `C-t o`, `C-t C-n`, `C-t C-p` and `C-t s` select the pane in Emacs at
